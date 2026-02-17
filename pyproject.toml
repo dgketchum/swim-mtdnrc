@@ -1,0 +1,31 @@
+[project]
+name = "swim-mtdnrc"
+version = "0.1.0"
+description = "Tongue River Basin: NDVI clustering, calibration & regression for MT DNRC"
+readme = "README.md"
+authors = [
+    { name = "dgketchum", email = "dgketchum@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "scipy",
+    "matplotlib",
+    "geopandas",
+    "fiona",
+    "earthengine-api",
+    "dataretrieval",
+    "swimrs @ file:///home/dgketchum/code/swim-rs",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.5,<0.10.0"]
+build-backend = "uv_build"
