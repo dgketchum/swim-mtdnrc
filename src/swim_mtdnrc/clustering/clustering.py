@@ -6,7 +6,7 @@ and runs k-means clustering.
 
 Usage:
     python -m swim_mtdnrc.clustering.clustering \
-        --ndvi-dir /nas/swim/examples/tongue_new/data/landsat/merged/ndvi/irr \
+        --ndvi-dir /nas/swim/examples/tongue_new/data/landsat/extracts/ndvi/irr \
         --k 6,8,10,12 --output-dir /nas/swim/examples/tongue_new/data/clustering
 """
 
@@ -286,7 +286,7 @@ def main():
     parser.add_argument(
         "--ndvi-dir",
         type=str,
-        default="/nas/swim/examples/tongue_new/data/landsat/merged/ndvi/irr",
+        default="/nas/swim/examples/tongue_new/data/landsat/extracts/ndvi/irr",
         help="Directory with merged NDVI CSVs",
     )
     parser.add_argument(

@@ -6,7 +6,7 @@ phenological metrics (green-up, peak, senescence), and temporal stability analys
 Usage:
     python -m swim_mtdnrc.clustering.crop_curves \
         --cluster-dir /nas/swim/examples/tongue_new/data/clustering \
-        --ndvi-dir /nas/swim/examples/tongue_new/data/landsat/merged/ndvi/irr \
+        --ndvi-dir /nas/swim/examples/tongue_new/data/landsat/extracts/ndvi/irr \
         --k 8
 """
 
@@ -198,20 +198,42 @@ def temporal_stability(assignments):
     return pd.DataFrame(rows).sort_values("fid")
 
 
-def plot_crop_curves(centroids, output_dir, k):
-    """Plot centroid NDVI curves — one per cluster + composite overlay.
+def plot_crop_curves(centroids, assignments, all_profiles, all_labels, output_dir, k):
+    """Plot centroid NDVI curves with real percentile bands from cluster members.
 
-    Saves per-cluster and composite plots to output_dir.
+    Parameters
+    ----------
+    centroids : dict
+        {cluster_id: np.ndarray of shape (GROWING_SEASON_DAYS,)}
+    assignments : dict
+        {field_year: cluster_id}
+    all_profiles : np.ndarray, shape (n_profiles, GROWING_SEASON_DAYS)
+        Pre-loaded interpolated profiles.
+    all_labels : list of str
+        Corresponding field-year labels.
+    output_dir : str
+    k : int
     """
     os.makedirs(output_dir, exist_ok=True)
 
     days = pd.date_range("2020-04-01", periods=GROWING_SEASON_DAYS, freq="D")
     colors = plt.cm.tab10(np.linspace(0, 1, len(centroids)))
 
+    # Build per-cluster profile arrays
+    cluster_profiles = {}
+    for cid in sorted(centroids.keys()):
+        mask = np.array([assignments.get(label, -1) == cid for label in all_labels])
+        if mask.sum() > 0:
+            cluster_profiles[cid] = all_profiles[mask]
+
     # Composite plot
     fig, ax = plt.subplots(figsize=(12, 6))
     for i, (cid, profile) in enumerate(sorted(centroids.items())):
         ax.plot(days, profile, color=colors[i], linewidth=2, label=f"Cluster {cid}")
+        if cid in cluster_profiles:
+            p25 = np.percentile(cluster_profiles[cid], 25, axis=0)
+            p75 = np.percentile(cluster_profiles[cid], 75, axis=0)
+            ax.fill_between(days, p25, p75, alpha=0.15, color=colors[i])
 
     ax.set_xlabel("Date")
     ax.set_ylabel("NDVI")
@@ -230,10 +252,13 @@ def plot_crop_curves(centroids, output_dir, k):
     for cid, profile in sorted(centroids.items()):
         fig, ax = plt.subplots(figsize=(10, 5))
         ax.plot(days, profile, color="green", linewidth=2)
-        ax.fill_between(days, profile * 0.85, profile * 1.15, alpha=0.2, color="green")
+        if cid in cluster_profiles:
+            p25 = np.percentile(cluster_profiles[cid], 25, axis=0)
+            p75 = np.percentile(cluster_profiles[cid], 75, axis=0)
+            ax.fill_between(days, p25, p75, alpha=0.2, color="green")
         ax.set_xlabel("Date")
         ax.set_ylabel("NDVI")
-        ax.set_title(f"Cluster {cid} — Median Crop Curve")
+        ax.set_title(f"Cluster {cid} — Median Crop Curve (25th-75th pctl)")
         ax.set_ylim(0, 1)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
@@ -258,7 +283,7 @@ def main():
     parser.add_argument(
         "--ndvi-dir",
         type=str,
-        default="/nas/swim/examples/tongue_new/data/landsat/merged/ndvi/irr",
+        default="/nas/swim/examples/tongue_new/data/landsat/extracts/ndvi/irr",
         help="Directory with merged NDVI CSVs (for percentile computation)",
     )
     parser.add_argument(
@@ -297,8 +322,17 @@ def main():
     print(f"  {n_stable}/{n_total} fields stable (>80% same cluster)")
     print(f"  -> {stability_path}")
 
+    print("\n=== Loading NDVI profiles for percentile bands ===")
+    from swim_mtdnrc.clustering.clustering import extract_growing_season_profiles
+
+    all_profiles, all_labels = extract_growing_season_profiles(
+        args.ndvi_dir, min_scenes=3
+    )
+
     print("\n=== Plotting crop curves ===")
-    plot_crop_curves(centroids, output_dir, args.k)
+    plot_crop_curves(
+        centroids, assignments, all_profiles, all_labels, output_dir, args.k
+    )
 
     print("\nDone.")
 

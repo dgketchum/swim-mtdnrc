@@ -68,10 +68,10 @@ def load_gridmet_growing_season(met_dir, years):
     gs = df[df["month"].isin(GROWING_SEASON_MONTHS) & df["year"].isin(years)]
 
     # Identify available met columns (different naming conventions)
-    precip_col = _find_col(gs, ["pr", "precip", "ppt", "prcp"])
-    tmin_col = _find_col(gs, ["tmmn", "tmin"])
-    tmax_col = _find_col(gs, ["tmmx", "tmax"])
-    eto_col = _find_col(gs, ["eto", "etr", "pet"])
+    precip_col = _find_col(gs, ["prcp_mm", "pr", "precip", "ppt", "prcp"])
+    tmin_col = _find_col(gs, ["tmin_c", "tmmn", "tmin"])
+    tmax_col = _find_col(gs, ["tmax_c", "tmmx", "tmax"])
+    eto_col = _find_col(gs, ["eto_mm", "eto", "etr", "pet"])
 
     result_rows = []
     for year in years:
@@ -185,14 +185,17 @@ def build_feature_table(cluster_dir, k, met_dir=None, streamflow_path=None):
         if len(met_df) > 0:
             df = df.merge(met_df, on="year", how="left")
 
-    # Merge streamflow
+    # Merge streamflow (all gages, with suffixed columns)
     if streamflow_path and os.path.exists(streamflow_path):
         flow_df = load_streamflow_growing_season(streamflow_path, years)
         if len(flow_df) > 0:
-            # Use first gage for simplicity; pivot if multiple
-            first_gage = flow_df["gage"].iloc[0]
-            flow_single = flow_df[flow_df["gage"] == first_gage].drop(columns=["gage"])
-            df = df.merge(flow_single, on="year", how="left")
+            for gage_name in flow_df["gage"].unique():
+                gage_df = flow_df[flow_df["gage"] == gage_name].drop(columns=["gage"])
+                suffix = gage_name.split("_", 1)[-1] if "_" in gage_name else gage_name
+                gage_df = gage_df.rename(
+                    columns={c: f"{c}_{suffix}" for c in gage_df.columns if c != "year"}
+                )
+                df = df.merge(gage_df, on="year", how="left")
 
     # Add trend variable
     df["year_trend"] = df["year"] - df["year"].min()
@@ -346,7 +349,7 @@ def main():
     parser.add_argument(
         "--met-dir",
         type=str,
-        default="/nas/swim/examples/tongue_new/data/met_timeseries",
+        default="/nas/swim/examples/tongue_new/data/met_timeseries/gridmet",
     )
     parser.add_argument(
         "--streamflow",
