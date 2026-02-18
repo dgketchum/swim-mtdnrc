@@ -1,10 +1,11 @@
-"""SSEBop ETf extraction for Tongue River Basin (2,084 fields).
+"""SSEBop NHM ETf extraction for Tongue River Basin (2,084 fields).
 
-Adapts sid_etf.py for the tongue shapefile using SSEBop ETf (et_fraction / 10000).
+Extracts ET fraction from the USGS NHM SSEBop Landsat Collection 2 asset
+using bulk reduceRegions across all fields per year.
 
 Usage:
     python -m swim_mtdnrc.extraction.tongue_extract_ssebop \
-        --years 2016,2017,2018 --mask-types irr,inv_irr --dest bucket
+        --start-yr 1987 --end-yr 2025 --mask-types irr,inv_irr --dest bucket
 """
 
 import argparse
@@ -16,6 +17,7 @@ import ee
 
 from swimrs.data_extraction.ee.common import (
     export_table,
+    parse_scene_name,
     shapefile_to_feature_collection,
 )
 from swimrs.data_extraction.ee.ee_utils import is_authorized
@@ -27,7 +29,8 @@ IRR = "projects/ee-dgketchum/assets/IrrMapper/IrrMapperComp"
 FEATURE_ID = "FID"
 SHAPEFILE = "/nas/swim/examples/tongue_new/data/gis/tongue_fields_gfid.shp"
 
-SSEBOP_COLLECTION = "projects/openet/assets/ssebop/conus/gridmet/landsat/v2_1"
+NHM_SSEBOP = "projects/usgs-gee-nhm-ssebop/assets/ssebop/landsat/c02"
+IRR_MIN_YEAR = 1986
 IRR_MAX_YEAR = 2023
 
 OUTPUT_ROOT = "/nas/swim/examples/tongue_new/data/landsat/extracts/ssebop_etf"
@@ -38,17 +41,17 @@ def extract_ssebop_etf(
     irr_coll,
     irr_min_yr_mask,
     mask_type="irr",
-    start_yr=2016,
-    end_yr=2024,
+    start_yr=1984,
+    end_yr=2023,
     years=None,
     feature_id="FID",
     dest="bucket",
     bucket="wudr",
     file_prefix="tongue",
 ):
-    """Extract mean SSEBop ETf per field.
+    """Extract mean SSEBop NHM ETf per field.
 
-    SSEBop band: et_fraction / 10000, clamped to [0, 2].
+    Uses USGS NHM SSEBop Landsat C02 asset. Band: et_fraction / 10000.
 
     Parameters
     ----------
@@ -59,7 +62,7 @@ def extract_ssebop_etf(
         years = list(range(start_yr, end_yr + 1))
 
     for year in years:
-        irr_year = min(year, IRR_MAX_YEAR)
+        irr_year = max(IRR_MIN_YEAR, min(year, IRR_MAX_YEAR))
         irr = (
             irr_coll.filterDate(f"{irr_year}-01-01", f"{irr_year}-12-31")
             .select("classification")
@@ -68,12 +71,11 @@ def extract_ssebop_etf(
         irr_mask = irr_min_yr_mask.updateMask(irr.lt(1))
 
         coll = (
-            ee.ImageCollection(SSEBOP_COLLECTION)
+            ee.ImageCollection(NHM_SSEBOP)
             .filterDate(f"{year}-01-01", f"{year}-12-31")
             .filterBounds(feature_coll.geometry())
         )
 
-        # Normalize: et_fraction / 10000, clamp [0, 2]
         def normalize(img):
             etf = img.select("et_fraction").divide(10000).clamp(0, 2).rename("etf")
             return ee.Image(
@@ -97,8 +99,15 @@ def extract_ssebop_etf(
                 print(f"  getInfo failed ({exc}), retrying in {WAIT_MINUTES} min...")
                 time.sleep(WAIT_MINUTES * 60)
 
-        band_names = sorted(scenes.keys())
-        print(f"  {year}: {len(band_names)} scenes (ssebop)")
+        if not scenes:
+            print(f"  {year}: no scenes, skipping")
+            continue
+
+        band_names = sorted(
+            [parse_scene_name(s) for s in scenes.keys()],
+            key=lambda s: s.split("_")[-1],
+        )
+        print(f"  {year}: {len(band_names)} scenes (nhm ssebop)")
         bands = coll.toBands().rename(band_names)
 
         data = bands.reduceRegions(
@@ -143,10 +152,10 @@ def extract_ssebop_etf(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="SSEBop ETf extraction for Tongue River Basin"
+        description="SSEBop NHM ETf extraction for Tongue River Basin"
     )
-    parser.add_argument("--start-yr", type=int, default=2016)
-    parser.add_argument("--end-yr", type=int, default=2024)
+    parser.add_argument("--start-yr", type=int, default=1984)
+    parser.add_argument("--end-yr", type=int, default=2023)
     parser.add_argument(
         "--years",
         type=str,
@@ -180,7 +189,7 @@ def main():
     fc = shapefile_to_feature_collection(SHAPEFILE, FEATURE_ID)
 
     for mask_type in mask_types:
-        print(f"\n=== SSEBop ETf mask={mask_type} ===")
+        print(f"\n=== SSEBop NHM ETf mask={mask_type} ===")
         extract_ssebop_etf(
             fc,
             irr_coll,
