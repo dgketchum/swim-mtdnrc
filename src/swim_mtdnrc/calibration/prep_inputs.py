@@ -4,12 +4,14 @@ Utilities:
   1a. Deduplicate shapefile (2,084 rows → 2,000 unique FIDs)
   1b. Convert GridMET parquets to container format (rename + remap columns)
   1c. Convert SNODAS JSON files to CSV format (mm → meters)
+  1d. Extend GridMET parquets to cover full project date range (append mode)
 
 Usage:
     python -m swim_mtdnrc.calibration.prep_inputs --all
     python -m swim_mtdnrc.calibration.prep_inputs --dedup-shp
     python -m swim_mtdnrc.calibration.prep_inputs --gridmet
     python -m swim_mtdnrc.calibration.prep_inputs --snodas
+    python -m swim_mtdnrc.calibration.prep_inputs --extend-gridmet
 """
 
 import argparse
@@ -24,6 +26,8 @@ TONGUE_ROOT = Path("/nas/swim/examples/tongue")
 
 SHP_PATH = TONGUE_ROOT / "data/gis/tongue_fields_gfid.shp"
 GRIDMET_DIR = TONGUE_ROOT / "data/met_timeseries/gridmet"
+BIAS_TIF_DIR = TONGUE_ROOT / "data/bias_correction_tif"
+FACTORS_JSON = TONGUE_ROOT / "data/met_timeseries/gridmet_factors.json"
 
 SNODAS_OUT = TONGUE_ROOT / "data/snow/snodas/extracts"
 
@@ -187,6 +191,48 @@ def convert_snodas(
     print(f"Wrote {n_written} monthly SNODAS CSVs → {output_dir}")
 
 
+def extend_gridmet(
+    shp_path=None,
+    gridmet_dir=None,
+    bias_tif_dir=None,
+    factors_json=None,
+    start="1987-01-01",
+    end="2025-12-31",
+):
+    """Extend GridMET parquets to cover the full project date range.
+
+    1. Generate bias-correction factors JSON (if missing).
+    2. Append new dates to existing parquets via download_gridmet(append=True).
+    """
+    from swimrs.data_extraction.gridmet.gridmet import (
+        download_gridmet,
+        sample_gridmet_corrections,
+    )
+
+    shp_path = str(shp_path or SHP_PATH)
+    gridmet_dir = str(gridmet_dir or GRIDMET_DIR)
+    bias_tif_dir = str(bias_tif_dir or BIAS_TIF_DIR)
+    factors_json = str(factors_json or FACTORS_JSON)
+
+    if not Path(factors_json).exists():
+        print("Generating GridMET correction factors...")
+        sample_gridmet_corrections(shp_path, bias_tif_dir, factors_json)
+    else:
+        print(f"Correction factors already exist: {factors_json}")
+
+    print(f"Appending GridMET data {start} to {end}...")
+    download_gridmet(
+        fields=shp_path,
+        gridmet_factors=factors_json,
+        gridmet_csv_dir=gridmet_dir,
+        start=start,
+        end=end,
+        append=True,
+        feature_id="FID",
+    )
+    print("GridMET extension complete.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Prepare Tongue River Basin inputs for SwimContainer"
@@ -200,6 +246,11 @@ def main():
     )
     parser.add_argument("--snodas", action="store_true", help="Convert SNODAS JSONs")
     parser.add_argument(
+        "--extend-gridmet",
+        action="store_true",
+        help="Extend GridMET parquets to 2025 (append mode)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Show what would be done"
     )
     parser.add_argument("--shp-path", type=str, help="Override shapefile path")
@@ -207,15 +258,13 @@ def main():
     parser.add_argument(
         "--output-dir", type=str, help="Override SNODAS output directory"
     )
-    parser.add_argument(
-        "--tongue-json", type=str, help="Path to tongue SNODAS JSON"
-    )
-    parser.add_argument(
-        "--annex-json", type=str, help="Path to annex SNODAS JSON"
-    )
+    parser.add_argument("--tongue-json", type=str, help="Path to tongue SNODAS JSON")
+    parser.add_argument("--annex-json", type=str, help="Path to annex SNODAS JSON")
     args = parser.parse_args()
 
-    if not any([args.all, args.dedup_shp, args.gridmet, args.snodas]):
+    if not any(
+        [args.all, args.dedup_shp, args.gridmet, args.snodas, args.extend_gridmet]
+    ):
         parser.print_help()
         return
 
@@ -236,6 +285,13 @@ def main():
             annex_json=args.annex_json,
             output_dir=args.output_dir,
             dry_run=args.dry_run,
+        )
+
+    if args.extend_gridmet:
+        print("\n=== 1d. Extend GridMET (append 2022-2025) ===")
+        extend_gridmet(
+            shp_path=args.shp_path,
+            gridmet_dir=args.gridmet_dir,
         )
 
 

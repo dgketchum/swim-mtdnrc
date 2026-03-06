@@ -1,8 +1,8 @@
 """Build SwimContainer for Tongue River Basin.
 
-Creates a container at /nas/swim/examples/tongue/data/tongue.swim, ingests
-GridMET, NDVI, ETf, SNODAS, and properties, then computes merged NDVI and
-field dynamics.
+Creates a container at /nas/swim/examples/tongue_new/data/tongue_new.swim,
+ingests GridMET, NDVI, multi-model ETf, SNODAS, and properties, then computes
+merged NDVI and field dynamics with ensemble ETf.
 
 Usage:
     python -m swim_mtdnrc.calibration.build_container
@@ -17,19 +17,35 @@ from pathlib import Path
 from swimrs.container.container import SwimContainer
 
 TONGUE_ROOT = Path("/nas/swim/examples/tongue")
+TONGUE_NEW = Path("/nas/swim/examples/tongue_new")
 DATA = TONGUE_ROOT / "data"
+DATA_NEW = TONGUE_NEW / "data"
 
-SHP_PATH = DATA / "gis/tongue_fields_gfid.shp"
-CONTAINER_PATH = DATA / "tongue.swim"
+SHP_PATH = DATA_NEW / "gis/tongue_fields_gfid.shp"
+CONTAINER_PATH = DATA_NEW / "tongue_new.swim"
+
+# Shared data (extended to 2025)
 MET_DIR = DATA / "met_timeseries/gridmet"
-NDVI_DIR = DATA / "landsat/extracts/ndvi"
-ETF_DIR = DATA / "landsat/extracts/etf"
 SNODAS_DIR = DATA / "snow/snodas/extracts"
 SSURGO_CSV = DATA / "properties/tongue_ssurgo.csv"
 IRR_CSV = DATA / "properties/tongue_irr.csv"
 
-START_DATE = "1989-01-01"
-END_DATE = "2021-12-31"
+# Merged extracts (2000 fields, 1987-2025)
+NDVI_DIR = DATA_NEW / "landsat/extracts/ndvi"
+ETF_ROOT = DATA_NEW / "landsat/extracts"
+
+ETF_MODELS = [
+    "disalexi",
+    "eemetric",
+    "ensemble",
+    "geesebal",
+    "ptjpl",
+    "sims",
+    "ssebop",
+]
+
+START_DATE = "1987-01-01"
+END_DATE = "2025-12-31"
 
 
 def create_container(container_path=None, overwrite=False):
@@ -76,23 +92,17 @@ def ingest(container):
         mask="inv_irr",
     )
 
-    print("\n--- ETf (irr) ---")
-    container.ingest.etf(
-        source_dir=str(ETF_DIR / "irr"),
-        uid_column="FID",
-        model="ssebop",
-        mask="irr",
-        instrument="landsat",
-    )
-
-    print("\n--- ETf (inv_irr) ---")
-    container.ingest.etf(
-        source_dir=str(ETF_DIR / "inv_irr"),
-        uid_column="FID",
-        model="ssebop",
-        mask="inv_irr",
-        instrument="landsat",
-    )
+    for model in ETF_MODELS:
+        for mask in ["irr", "inv_irr"]:
+            etf_dir = ETF_ROOT / f"{model}_etf" / mask
+            print(f"\n--- ETf ({model}, {mask}) ---")
+            container.ingest.etf(
+                source_dir=str(etf_dir),
+                uid_column="FID",
+                model=model,
+                mask=mask,
+                instrument="landsat",
+            )
 
     print("\n--- SNODAS ---")
     container.ingest.snodas(
@@ -118,9 +128,9 @@ def compute(container):
         instruments=("landsat",),
     )
 
-    print("\n--- Dynamics ---")
+    print("\n--- Dynamics (ensemble) ---")
     container.compute.dynamics(
-        etf_model="ssebop",
+        etf_model="ensemble",
         use_mask=True,
         use_lulc=False,
         masks=("irr", "inv_irr"),
