@@ -32,7 +32,7 @@ def export_irr_min_yr_mask(feature_coll):
     that otherwise causes 'too many bands' errors in toBands() exports.
     """
     irr_coll = ee.ImageCollection(IRR)
-    remap = irr_coll.filterDate("1987-01-01", "2024-12-31").select("classification")
+    remap = irr_coll.filterDate("1987-01-01", "2026-01-01").select("classification")
     irr_min_yr_mask = remap.map(lambda img: img.lt(1)).sum().gte(5).toByte()
 
     region = feature_coll.geometry().bounds()
@@ -90,7 +90,7 @@ def extract_ndvi(
         print("  Using pre-computed irr_min_yr_mask asset")
     except ee.ee_exception.EEException:
         print("  WARNING: irr_min_yr_mask asset not found, computing live")
-        remap = irr_coll.filterDate("1987-01-01", "2024-12-31").select("classification")
+        remap = irr_coll.filterDate("1987-01-01", "2026-01-01").select("classification")
         irr_min_yr_mask = remap.map(lambda img: img.lt(1)).sum().gte(5)
 
     if years is None:

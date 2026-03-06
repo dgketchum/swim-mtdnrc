@@ -31,7 +31,8 @@ SHAPEFILE = "/nas/swim/examples/tongue_new/data/gis/tongue_fields_gfid.shp"
 
 NHM_SSEBOP = "projects/usgs-gee-nhm-ssebop/assets/ssebop/landsat/c02"
 IRR_MIN_YEAR = 1986
-IRR_MAX_YEAR = 2023
+# IrrMapper latest available year
+IRR_MAX_YEAR = 2025
 
 OUTPUT_ROOT = "/nas/swim/examples/tongue_new/data/landsat/extracts/ssebop_etf"
 
@@ -182,7 +183,7 @@ def main():
     is_authorized(args.project)
 
     irr_coll = ee.ImageCollection(IRR)
-    remap = irr_coll.filterDate("1987-01-01", "2024-12-31").select("classification")
+    remap = irr_coll.filterDate("1987-01-01", "2026-01-01").select("classification")
     irr_min_yr_mask = remap.map(lambda img: img.lt(1)).sum().gte(5)
     print("Computed irr_min_yr_mask (live)")
 

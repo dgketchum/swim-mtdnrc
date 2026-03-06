@@ -151,7 +151,7 @@ def run(
     is_authorized(project)
 
     irr_coll = ee.ImageCollection(IRR)
-    remap = irr_coll.filterDate("1987-01-01", "2024-12-31").select("classification")
+    remap = irr_coll.filterDate("1987-01-01", "2026-01-01").select("classification")
     irr_min_yr_mask = remap.map(lambda img: img.lt(1)).sum().gte(5)
     print("Computed irr_min_yr_mask (live)")
 

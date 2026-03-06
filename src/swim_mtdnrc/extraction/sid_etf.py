@@ -45,8 +45,8 @@ ET_BAND_MODELS = {"geesebal", "disalexi", "ptjpl"}
 # Ensemble model: et_ensemble_mad / 10000
 ENSEMBLE_MODELS = {"ensemble"}
 
-# IrrMapper ends at 2023 — cap year for 2024-2025
-IRR_MAX_YEAR = 2023
+# IrrMapper latest available year
+IRR_MAX_YEAR = 2025
 
 
 def _normalize_etf(model, image):
@@ -272,7 +272,7 @@ if __name__ == "__main__":
     is_authorized(args.project)
 
     irr_coll = ee.ImageCollection(IRR)
-    remap = irr_coll.filterDate("1987-01-01", "2024-12-31").select("classification")
+    remap = irr_coll.filterDate("1987-01-01", "2026-01-01").select("classification")
     irr_min_yr_mask = remap.map(lambda img: img.lt(1)).sum().gte(5)
     print("Computed irr_min_yr_mask (live)")
 
