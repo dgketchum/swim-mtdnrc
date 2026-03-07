@@ -3,15 +3,28 @@
 Partitions ~2,000 fields into ~40 GFID-based batches of ~50 fields each,
 builds PEST++ setups for each batch, runs them, and merges results.
 
+The ``calibrate-all`` action pipelines the workflow: builds, runs, ingests,
+and cleans up one batch at a time, pre-building the next batch while the
+current batch's PEST++ run executes.
+
 Usage:
+    python -m swim_mtdnrc.calibration.batch_calibrate --action calibrate-all
+    python -m swim_mtdnrc.calibration.batch_calibrate --action calibrate-all --resume
     python -m swim_mtdnrc.calibration.batch_calibrate --action prep
     python -m swim_mtdnrc.calibration.batch_calibrate --action build-all
     python -m swim_mtdnrc.calibration.batch_calibrate --action run-batch --batch-id 0
     python -m swim_mtdnrc.calibration.batch_calibrate --action run-all
     python -m swim_mtdnrc.calibration.batch_calibrate --action merge
+    python -m swim_mtdnrc.calibration.batch_calibrate --action cleanup-failed
 """
 
 import argparse
+import json
+import multiprocessing
+import re
+import shutil
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 import geopandas as gpd
@@ -22,6 +35,29 @@ DEFAULT_CONTAINER = TONGUE_ROOT / "data/tongue.swim"
 DEFAULT_TOML = TONGUE_ROOT / "tongue.toml"
 DEFAULT_OUTPUT = TONGUE_ROOT / "pestrun"
 DEFAULT_SHP = TONGUE_ROOT / "data/gis/tongue_fields_gfid.shp"
+
+
+def _read_batch_log(output_root):
+    """Read batch_log.json, return dict keyed by batch_id string."""
+    log_path = Path(output_root) / "batch_log.json"
+    if log_path.exists():
+        return json.loads(log_path.read_text())
+    return {}
+
+
+def _write_batch_log(output_root, log_data):
+    """Atomic write of batch_log.json via tmp+rename."""
+    log_path = Path(output_root) / "batch_log.json"
+    tmp_path = log_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(log_data, indent=2))
+    tmp_path.rename(log_path)
+
+
+def _update_batch_entry(output_root, batch_id, entry):
+    """Read batch_log, update one entry, write back."""
+    log_data = _read_batch_log(output_root)
+    log_data[str(batch_id)] = entry
+    _write_batch_log(output_root, log_data)
 
 
 def partition_fields_by_gfid(shapefile, batch_size=50):
@@ -65,52 +101,14 @@ def partition_fields_by_gfid(shapefile, batch_size=50):
     return batches
 
 
-def build_batch(
-    container_path, toml_path, batch_fids, batch_id, output_root, noptmax=4, reals=200
-):
-    """Build PEST++ setup for a single batch of fields.
-
-    Parameters
-    ----------
-    container_path : str or Path
-        Path to .swim container.
-    toml_path : str or Path
-        Path to project TOML config.
-    batch_fids : list[str]
-        Field UIDs in this batch.
-    batch_id : int
-        Batch index.
-    output_root : str or Path
-        Root directory for batch outputs.
-    noptmax : int
-        Maximum PEST++ optimization iterations.
-    reals : int
-        Number of ensemble realizations.
-    """
+def _do_build(config, container, batch_id, noptmax, reals):
+    """Run the PestBuilder sequence. Returns on success, raises on failure."""
     from swimrs.calibrate.pest_builder import PestBuilder
-    from swimrs.container.container import SwimContainer
-    from swimrs.swim.config import ProjectConfig
 
-    batch_dir = Path(output_root) / f"batch_{batch_id:03d}"
-    batch_dir.mkdir(parents=True, exist_ok=True)
-
-    config = ProjectConfig()
-    config.read_config(
-        str(toml_path), calibrate=True, calibration_dir_override=str(batch_dir)
-    )
-
-    container = SwimContainer.open(str(container_path), mode="r")
-
-    # Subset container field list — keep original zarr indices intact so
-    # downstream reads (exporter, calculator) pull the correct array positions.
-    batch_fid_set = set(batch_fids)
-    container._field_uids = [
-        uid for uid in container._field_uids if uid in batch_fid_set
-    ]
-
+    builder = PestBuilder(config, container)
     try:
-        builder = PestBuilder(config, container)
-        print(f"  Batch {batch_id:03d}: spinup ({len(batch_fids)} fields)...")
+        n = len(container._field_uids)
+        print(f"  Batch {batch_id:03d}: spinup ({n} fields)...")
         builder.spinup()
         print(f"  Batch {batch_id:03d}: build_pest...")
         builder.build_pest(target_etf="ssebop")
@@ -121,6 +119,430 @@ def build_batch(
         print(f"  Batch {batch_id:03d}: done.")
     finally:
         builder.close()
+
+
+def build_batch(
+    container_path, toml_path, batch_fids, batch_id, output_root, noptmax=4, reals=200
+):
+    """Build PEST++ setup for a single batch of fields.
+
+    Returns dict with status, n_fields, dropped_fids on success/failure.
+    Catches NaN spinup errors, drops bad FIDs, and retries once.
+    """
+    from swimrs.container.container import SwimContainer
+    from swimrs.swim.config import ProjectConfig
+
+    batch_dir = Path(output_root) / f"batch_{batch_id:03d}"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    dropped_fids = []
+
+    def _open_and_subset(fids):
+        config = ProjectConfig()
+        config.read_config(
+            str(toml_path), calibrate=True, calibration_dir_override=str(batch_dir)
+        )
+        container = SwimContainer.open(str(container_path), mode="r")
+        fid_set = set(fids)
+        container._field_uids = [uid for uid in container._field_uids if uid in fid_set]
+        return config, container
+
+    config, container = _open_and_subset(batch_fids)
+
+    try:
+        _do_build(config, container, batch_id, noptmax, reals)
+        return {
+            "status": "built",
+            "n_fields": len(batch_fids),
+            "dropped_fids": dropped_fids,
+        }
+    except ValueError as exc:
+        if "NaN state" not in str(exc):
+            return {
+                "status": "build_failed",
+                "n_fields": len(batch_fids),
+                "dropped_fids": dropped_fids,
+                "error": traceback.format_exc()[-4096:],
+            }
+
+        # Parse bad FIDs from error message
+        msg = str(exc)
+        # Message format: "... field(s): ['1416', '1417']... "
+        match = re.search(r"\[([^\]]+)\]", msg)
+        if match:
+            bad_fids = re.findall(r"'(\d+)'", match.group(1))
+        else:
+            bad_fids = []
+
+        # If message was truncated (...) and we found fewer than expected,
+        # skip the whole batch — we can't know which FIDs to drop
+        count_match = re.search(r"(\d+) field\(s\)", msg)
+        n_bad = int(count_match.group(1)) if count_match else len(bad_fids)
+        if n_bad > len(bad_fids):
+            return {
+                "status": "build_failed",
+                "n_fields": len(batch_fids),
+                "dropped_fids": bad_fids,
+                "error": f"Too many NaN fields ({n_bad}) to recover; skipping batch",
+            }
+
+        dropped_fids = bad_fids
+        remaining = [f for f in batch_fids if f not in set(dropped_fids)]
+        if not remaining:
+            return {
+                "status": "build_failed",
+                "n_fields": len(batch_fids),
+                "dropped_fids": dropped_fids,
+                "error": "All fields had NaN spinup",
+            }
+
+        print(
+            f"  Batch {batch_id:03d}: dropped {len(dropped_fids)} NaN FIDs "
+            f"{dropped_fids}, retrying with {len(remaining)} fields..."
+        )
+
+        # Clean up failed build directory before retry
+        if batch_dir.exists():
+            shutil.rmtree(batch_dir)
+        batch_dir.mkdir(parents=True, exist_ok=True)
+
+        config, container = _open_and_subset(remaining)
+        try:
+            _do_build(config, container, batch_id, noptmax, reals)
+            return {
+                "status": "built",
+                "n_fields": len(remaining),
+                "dropped_fids": dropped_fids,
+            }
+        except Exception:
+            return {
+                "status": "build_failed",
+                "n_fields": len(remaining),
+                "dropped_fids": dropped_fids,
+                "error": traceback.format_exc()[-4096:],
+            }
+
+
+def _build_batch_worker(
+    queue, container_path, toml_path, batch_fids, batch_id, output_root, noptmax, reals
+):
+    """Subprocess target: build a batch and put result on queue."""
+    try:
+        result = build_batch(
+            container_path,
+            toml_path,
+            batch_fids,
+            batch_id,
+            output_root,
+            noptmax=noptmax,
+            reals=reals,
+        )
+        queue.put(("ok", batch_id, result))
+    except Exception:
+        queue.put(("error", batch_id, traceback.format_exc()[-4096:]))
+
+
+def _batch_is_built(batch_dir):
+    """Check if batch_dir/pest/*.pst exists."""
+    pest_dir = Path(batch_dir) / "pest"
+    return pest_dir.exists() and any(pest_dir.glob("*.pst"))
+
+
+def calibrate_all(
+    container_path,
+    toml_path,
+    shapefile,
+    output_root,
+    batch_size=50,
+    num_workers=40,
+    noptmax=3,
+    reals=20,
+    resume=False,
+):
+    """Pipelined batch calibration: build, run, ingest, cleanup one batch at a time.
+
+    Pre-builds the next batch in a background process while the current batch's
+    PEST++ run executes. At most 2 batch directories on disk at any time.
+    """
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    # --- Batch manifest: single source of truth ---
+    manifest_path = output_root / "batch_manifest.csv"
+    if manifest_path.exists():
+        manifest = pd.read_csv(manifest_path)
+        batch_ids = sorted(manifest["batch_id"].unique())
+        batches = [
+            (bid, manifest.loc[manifest["batch_id"] == bid, "FID"].astype(str).tolist())
+            for bid in batch_ids
+        ]
+    else:
+        raw_batches = partition_fields_by_gfid(shapefile, batch_size)
+        rows = [
+            {"batch_id": i, "FID": fid}
+            for i, batch in enumerate(raw_batches)
+            for fid in batch
+        ]
+        pd.DataFrame(rows).to_csv(manifest_path, index=False)
+        batches = list(enumerate(raw_batches))
+        print(f"Created manifest with {len(batches)} batches: {manifest_path}")
+
+    # --- Determine which batches to process ---
+    batch_log = _read_batch_log(output_root)
+
+    # Also check container for batches ingested outside the pipeline
+    container_ingested = set()
+    try:
+        from swimrs.container.container import SwimContainer
+
+        c = SwimContainer.open(str(container_path), mode="r")
+        try:
+            if "calibration" in c._root:
+                batches_str = c._root["calibration"].attrs.get("batches", "{}")
+                container_ingested = set(json.loads(batches_str).keys())
+        finally:
+            c.close()
+    except Exception:
+        pass
+
+    to_process = []
+    for batch_id, batch_fids in batches:
+        bid_str = str(batch_id)
+        if resume:
+            log_entry = batch_log.get(bid_str, {})
+            status = log_entry.get("status", "")
+            if status == "ingested" or bid_str in container_ingested:
+                print(f"Batch {batch_id:03d}: already ingested, skipping")
+                continue
+        to_process.append((batch_id, batch_fids))
+
+    if not to_process:
+        print("All batches already processed.")
+        show_status(container_path)
+        return
+
+    print(f"\nProcessing {len(to_process)} batches (pipeline mode)...\n")
+
+    prebuild_proc = None
+    prebuild_queue = None
+    prebuild_batch_id = None
+
+    for step, (batch_id, batch_fids) in enumerate(to_process):
+        batch_dir = output_root / f"batch_{batch_id:03d}"
+
+        # --- PHASE A: Ensure this batch is built ---
+        build_result = None
+
+        if prebuild_proc is not None and prebuild_batch_id == batch_id:
+            # Collect result from background build
+            prebuild_proc.join(timeout=7200)
+            if prebuild_proc.exitcode != 0:
+                build_result = {
+                    "status": "build_failed",
+                    "n_fields": len(batch_fids),
+                    "dropped_fids": [],
+                    "error": f"Background build process exited with code {prebuild_proc.exitcode}",
+                }
+            elif not prebuild_queue.empty():
+                tag, _, result = prebuild_queue.get_nowait()
+                if tag == "ok":
+                    build_result = result
+                else:
+                    build_result = {
+                        "status": "build_failed",
+                        "n_fields": len(batch_fids),
+                        "dropped_fids": [],
+                        "error": result,
+                    }
+            else:
+                build_result = {
+                    "status": "build_failed",
+                    "n_fields": len(batch_fids),
+                    "dropped_fids": [],
+                    "error": "Background build produced no result",
+                }
+            prebuild_proc = None
+            prebuild_queue = None
+            prebuild_batch_id = None
+
+        elif _batch_is_built(batch_dir):
+            # Crash recovery: batch dir already on disk
+            print(f"Batch {batch_id:03d}: using existing build on disk")
+            build_result = {
+                "status": "built",
+                "n_fields": len(batch_fids),
+                "dropped_fids": [],
+            }
+
+        else:
+            # Build synchronously (first batch or after skip)
+            print(f"\n--- Building batch {batch_id:03d} (sync) ---")
+            build_result = build_batch(
+                container_path,
+                toml_path,
+                batch_fids,
+                batch_id,
+                output_root,
+                noptmax=noptmax,
+                reals=reals,
+            )
+
+        if build_result["status"] == "build_failed":
+            print(
+                f"Batch {batch_id:03d}: BUILD FAILED — {build_result.get('error', '')[:200]}"
+            )
+            _update_batch_entry(
+                output_root,
+                batch_id,
+                {
+                    "status": "build_failed",
+                    "n_fields": build_result["n_fields"],
+                    "dropped_fids": build_result.get("dropped_fids", []),
+                    "error": build_result.get("error", ""),
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            continue
+
+        # Update manifest if FIDs were dropped
+        dropped = build_result.get("dropped_fids", [])
+        if dropped:
+            manifest = pd.read_csv(manifest_path)
+            mask = (manifest["batch_id"] == batch_id) & (
+                manifest["FID"].astype(str).isin(set(dropped))
+            )
+            manifest = manifest[~mask]
+            manifest.to_csv(manifest_path, index=False)
+            batch_fids = [f for f in batch_fids if f not in set(dropped)]
+            print(f"  Manifest updated: dropped FIDs {dropped}")
+
+        # --- PHASE B: Start pre-building NEXT batch in background ---
+        if step + 1 < len(to_process):
+            next_batch_id, next_batch_fids = to_process[step + 1]
+            next_batch_dir = output_root / f"batch_{next_batch_id:03d}"
+            if not _batch_is_built(next_batch_dir):
+                prebuild_queue = multiprocessing.Queue()
+                prebuild_proc = multiprocessing.Process(
+                    target=_build_batch_worker,
+                    args=(
+                        prebuild_queue,
+                        container_path,
+                        toml_path,
+                        next_batch_fids,
+                        next_batch_id,
+                        str(output_root),
+                        noptmax,
+                        reals,
+                    ),
+                    daemon=True,
+                )
+                prebuild_proc.start()
+                prebuild_batch_id = next_batch_id
+                print(
+                    f"  Pre-building batch {next_batch_id:03d} in background (PID {prebuild_proc.pid})"
+                )
+
+        # --- PHASE C: Run PEST++ (blocks) ---
+        print(f"\n=== Running batch {batch_id:03d} ===")
+        try:
+            run_batch(batch_dir, num_workers=num_workers)
+        except Exception:
+            err = traceback.format_exc()[-4096:]
+            print(f"Batch {batch_id:03d}: RUN FAILED — {err[:200]}")
+            _update_batch_entry(
+                output_root,
+                batch_id,
+                {
+                    "status": "run_failed",
+                    "n_fields": build_result["n_fields"],
+                    "dropped_fids": dropped,
+                    "error": err,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            continue
+
+        # --- PHASE D: Ingest into container ---
+        try:
+            ingest_batch(container_path, output_root, batch_id)
+        except Exception:
+            err = traceback.format_exc()[-4096:]
+            print(f"Batch {batch_id:03d}: INGEST FAILED — {err[:200]}")
+            _update_batch_entry(
+                output_root,
+                batch_id,
+                {
+                    "status": "ingest_failed",
+                    "n_fields": build_result["n_fields"],
+                    "dropped_fids": dropped,
+                    "error": err,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            continue
+
+        # --- PHASE E: Log success + cleanup ---
+        # Read phi info from batch_log if ingest_batch stored it in the container
+        phi_initial = None
+        phi_final = None
+        try:
+            from swimrs.container.container import SwimContainer
+
+            c = SwimContainer.open(str(container_path), mode="r")
+            try:
+                if "calibration" in c._root:
+                    bm = json.loads(c._root["calibration"].attrs.get("batches", "{}"))
+                    info = bm.get(str(batch_id), {})
+                    phi_initial = info.get("phi_initial")
+                    phi_final = info.get("phi_final")
+            finally:
+                c.close()
+        except Exception:
+            pass
+
+        _update_batch_entry(
+            output_root,
+            batch_id,
+            {
+                "status": "ingested",
+                "n_fields": build_result["n_fields"],
+                "dropped_fids": dropped,
+                "error": None,
+                "timestamp": datetime.now().isoformat(),
+                "phi_initial": phi_initial,
+                "phi_final": phi_final,
+            },
+        )
+
+        print(f"Batch {batch_id:03d}: ingested, cleaning up build directory")
+        shutil.rmtree(batch_dir)
+
+    # Join any lingering prebuild process
+    if prebuild_proc is not None:
+        prebuild_proc.join(timeout=60)
+
+    print("\n=== Pipeline complete ===")
+    show_status(container_path)
+
+
+def cleanup_failed(output_root):
+    """Remove batch directories for run_failed and ingest_failed batches."""
+    output_root = Path(output_root)
+    batch_log = _read_batch_log(output_root)
+
+    cleaned = 0
+    for bid_str, entry in batch_log.items():
+        status = entry.get("status", "")
+        if status in ("run_failed", "ingest_failed"):
+            batch_dir = output_root / f"batch_{int(bid_str):03d}"
+            if batch_dir.exists():
+                shutil.rmtree(batch_dir)
+                print(f"Batch {bid_str}: removed {batch_dir}")
+                cleaned += 1
+            entry["status"] = "cleaned"
+            entry["timestamp"] = datetime.now().isoformat()
+
+    _write_batch_log(output_root, batch_log)
+    print(f"Cleaned {cleaned} failed batch directories")
 
 
 def run_batch(batch_dir, num_workers=10, pst_name=None):
@@ -266,8 +688,6 @@ def ingest_batch(container_path, output_root, batch_id, summary_stat="median"):
             results = PestResults(str(batch_dir / "pest"), project_name)
             summary = results.get_summary()
 
-            import json
-
             cal_group = container._root["calibration"]
             batches_meta = json.loads(cal_group.attrs.get("batches", "{}"))
             batches_meta[str(batch_id)] = {
@@ -297,8 +717,6 @@ def ingest_all(container_path, output_root, summary_stat="median"):
 
     Skips batches that have already been ingested (checks metadata).
     """
-    import json
-
     from swimrs.container.container import SwimContainer
 
     output_root = Path(output_root)
@@ -343,8 +761,6 @@ def ingest_all(container_path, output_root, summary_stat="median"):
 
 def show_status(container_path):
     """Print calibration status from the container."""
-    import json
-
     import numpy as np
     from swimrs.container.container import SwimContainer
 
@@ -376,8 +792,6 @@ def show_status(container_path):
 
 def plot_phi(container_path, output_path=None):
     """Plot phi evolution per batch from container metadata."""
-    import json
-
     import matplotlib.pyplot as plt
     from swimrs.container.container import SwimContainer
 
@@ -436,6 +850,8 @@ def main():
             "ingest-all",
             "status",
             "plot-phi",
+            "calibrate-all",
+            "cleanup-failed",
         ],
         help="Action to perform",
     )
@@ -542,6 +958,22 @@ def main():
 
     elif args.action == "plot-phi":
         plot_phi(args.container)
+
+    elif args.action == "calibrate-all":
+        calibrate_all(
+            container_path=args.container,
+            toml_path=args.toml,
+            shapefile=args.shapefile,
+            output_root=output_root,
+            batch_size=args.batch_size,
+            num_workers=args.workers,
+            noptmax=args.noptmax,
+            reals=args.reals,
+            resume=args.resume,
+        )
+
+    elif args.action == "cleanup-failed":
+        cleanup_failed(output_root)
 
 
 if __name__ == "__main__":
