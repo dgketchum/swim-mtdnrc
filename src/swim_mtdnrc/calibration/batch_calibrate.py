@@ -141,6 +141,12 @@ def build_batch(
         config.read_config(
             str(toml_path), calibrate=True, calibration_dir_override=str(batch_dir)
         )
+        # Override all paths that PestBuilder derives from pest_run_dir
+        bd = str(batch_dir)
+        config.pest_run_dir = bd
+        config.obs_folder = str(batch_dir / "obs")
+        config.spinup = str(batch_dir / "spinup.json")
+        config.initial_values_csv = str(batch_dir / "params.csv")
         container = SwimContainer.open(str(container_path), mode="r")
         fid_set = set(fids)
         container._field_uids = [uid for uid in container._field_uids if uid in fid_set]
@@ -226,6 +232,11 @@ def _build_batch_worker(
     queue, container_path, toml_path, batch_fids, batch_id, output_root, noptmax, reals
 ):
     """Subprocess target: build a batch and put result on queue."""
+    import os
+
+    # Set cwd to output_root so abspath calls don't fail if the parent's cwd
+    # was changed or deleted by run_pst in the main process.
+    os.chdir(output_root)
     try:
         result = build_batch(
             container_path,
