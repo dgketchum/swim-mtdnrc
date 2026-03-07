@@ -203,6 +203,222 @@ def merge_parameters(output_root):
     return out_path
 
 
+def _read_manifest(output_root):
+    """Read batch manifest CSV, return DataFrame with batch_id and FID columns."""
+    manifest = Path(output_root) / "batch_manifest.csv"
+    if not manifest.exists():
+        raise FileNotFoundError(f"Batch manifest not found: {manifest}")
+    return pd.read_csv(manifest)
+
+
+def _find_par_csv(batch_dir):
+    """Find the latest .par.csv in a batch's master/ directory."""
+    master = Path(batch_dir) / "master"
+    par_files = sorted(master.glob("*.par.csv"))
+    return par_files[-1] if par_files else None
+
+
+def ingest_batch(container_path, output_root, batch_id, summary_stat="median"):
+    """Ingest calibrated parameters from one batch into the container.
+
+    Parameters
+    ----------
+    container_path : str or Path
+        Path to the .swim container.
+    output_root : str or Path
+        Root directory containing batch_NNN subdirectories.
+    batch_id : int
+        Batch index to ingest.
+    summary_stat : str
+        Summary statistic across realizations.
+    """
+    from swimrs.calibrate.pest_cleanup import PestResults
+    from swimrs.container.container import SwimContainer
+
+    output_root = Path(output_root)
+    manifest = _read_manifest(output_root)
+    batch_fids = (
+        manifest.loc[manifest["batch_id"] == batch_id, "FID"].astype(str).tolist()
+    )
+    if not batch_fids:
+        print(f"No fields found for batch {batch_id} in manifest.")
+        return
+
+    batch_dir = output_root / f"batch_{batch_id:03d}"
+    par_csv = _find_par_csv(batch_dir)
+    if par_csv is None:
+        print(f"No .par.csv found in {batch_dir}/master/")
+        return
+
+    container = SwimContainer.open(str(container_path), mode="r+")
+    try:
+        container.ingest.calibration(
+            par_csv, fields=batch_fids, batch_id=batch_id, summary_stat=summary_stat
+        )
+        print(
+            f"Batch {batch_id:03d}: ingested {len(batch_fids)} fields from {par_csv.name}"
+        )
+
+        # Get summary and store in container attrs
+        pst_files = list((batch_dir / "pest").glob("*.pst"))
+        if pst_files:
+            project_name = pst_files[0].stem
+            results = PestResults(str(batch_dir / "pest"), project_name)
+            summary = results.get_summary()
+
+            import json
+
+            cal_group = container._root["calibration"]
+            batches_meta = json.loads(cal_group.attrs.get("batches", "{}"))
+            batches_meta[str(batch_id)] = {
+                "n_fields": len(batch_fids),
+                "status": summary.get("status", "unknown"),
+                "phi_initial": summary.get("phi_initial"),
+                "phi_final": summary.get("phi_final"),
+                "phi_reduction_pct": summary.get("phi_reduction_pct"),
+                "phi_history": summary.get("phi_history"),
+                "noptmax": summary.get("noptmax"),
+                "iterations_completed": summary.get("iterations_completed"),
+            }
+            cal_group.attrs["batches"] = json.dumps(batches_meta)
+
+            phi_red = summary.get("phi_reduction_pct", 0)
+            print(f"  Phi reduction: {phi_red:.1f}%")
+
+            # Cleanup
+            report = results.cleanup()
+            print(f"  Cleanup: {report['space_recovered_mb']:.1f} MB recovered")
+    finally:
+        container.close()
+
+
+def ingest_all(container_path, output_root, summary_stat="median"):
+    """Ingest all completed batches into the container.
+
+    Skips batches that have already been ingested (checks metadata).
+    """
+    import json
+
+    from swimrs.container.container import SwimContainer
+
+    output_root = Path(output_root)
+    manifest = _read_manifest(output_root)
+    batch_ids = sorted(manifest["batch_id"].unique())
+
+    container = SwimContainer.open(str(container_path), mode="r+")
+    try:
+        # Check which batches already ingested
+        already_done = set()
+        if "calibration" in container._root:
+            batches_str = container._root["calibration"].attrs.get("batches", "{}")
+            already_done = set(json.loads(batches_str).keys())
+
+        total_ingested = 0
+        for bid in batch_ids:
+            if str(bid) in already_done:
+                print(f"Batch {bid:03d}: already ingested, skipping")
+                continue
+
+            batch_dir = output_root / f"batch_{bid:03d}"
+            par_csv = _find_par_csv(batch_dir)
+            if par_csv is None:
+                print(f"Batch {bid:03d}: no .par.csv, skipping")
+                continue
+
+            batch_fids = (
+                manifest.loc[manifest["batch_id"] == bid, "FID"].astype(str).tolist()
+            )
+            container.ingest.calibration(
+                par_csv, fields=batch_fids, batch_id=bid, summary_stat=summary_stat
+            )
+            total_ingested += len(batch_fids)
+            print(f"Batch {bid:03d}: ingested {len(batch_fids)} fields")
+
+        print(
+            f"\nTotal: {total_ingested} fields ingested across {len(batch_ids)} batches"
+        )
+    finally:
+        container.close()
+
+
+def show_status(container_path):
+    """Print calibration status from the container."""
+    import json
+
+    import numpy as np
+    from swimrs.container.container import SwimContainer
+
+    container = SwimContainer.open(str(container_path), mode="r")
+    try:
+        root = container._root
+        if "calibration/metadata/calibrated" not in root:
+            print("No calibration data in container.")
+            return
+
+        cal = np.asarray(root["calibration/metadata/calibrated"][:])
+        n_cal = int(np.sum(cal > 0))
+        n_total = len(cal)
+        print(f"Calibrated: {n_cal}/{n_total} fields ({100 * n_cal / n_total:.1f}%)")
+
+        if "calibration" in root:
+            batches_str = root["calibration"].attrs.get("batches", "{}")
+            batches = json.loads(batches_str)
+            print(f"Batches completed: {len(batches)}")
+            for bid, info in sorted(batches.items(), key=lambda x: int(x[0])):
+                status = info.get("status", "?")
+                n = info.get("n_fields", "?")
+                phi_red = info.get("phi_reduction_pct")
+                phi_str = f"phi_red={phi_red:.1f}%" if phi_red is not None else ""
+                print(f"  Batch {int(bid):03d}: {n} fields, {status} {phi_str}")
+    finally:
+        container.close()
+
+
+def plot_phi(container_path, output_path=None):
+    """Plot phi evolution per batch from container metadata."""
+    import json
+
+    import matplotlib.pyplot as plt
+    from swimrs.container.container import SwimContainer
+
+    container = SwimContainer.open(str(container_path), mode="r")
+    try:
+        root = container._root
+        if "calibration" not in root:
+            print("No calibration data in container.")
+            return
+
+        batches_str = root["calibration"].attrs.get("batches", "{}")
+        batches = json.loads(batches_str)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for bid, info in sorted(batches.items(), key=lambda x: int(x[0])):
+            phi_history = info.get("phi_history")
+            if phi_history is None:
+                continue
+            ax.plot(
+                range(len(phi_history)),
+                phi_history,
+                marker="o",
+                markersize=3,
+                label=f"Batch {bid}",
+            )
+
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Mean Phi")
+        ax.set_title("PEST++ IES Phi Evolution by Batch")
+        if len(batches) <= 20:
+            ax.legend(fontsize=7, ncol=2)
+
+        if output_path is None:
+            output_path = Path(container_path).parent / "phi_evolution.png"
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Phi plot saved to {output_path}")
+        plt.close(fig)
+    finally:
+        container.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Batch PEST++ IES calibration for Tongue River Basin"
@@ -210,10 +426,25 @@ def main():
     parser.add_argument(
         "--action",
         required=True,
-        choices=["prep", "build-all", "run-batch", "run-all", "merge"],
+        choices=[
+            "prep",
+            "build-all",
+            "run-batch",
+            "run-all",
+            "merge",
+            "ingest-batch",
+            "ingest-all",
+            "status",
+            "plot-phi",
+        ],
         help="Action to perform",
     )
-    parser.add_argument("--batch-id", type=int, help="Batch ID for run-batch")
+    parser.add_argument(
+        "--batch-id", type=int, help="Batch ID for run-batch / ingest-batch"
+    )
+    parser.add_argument(
+        "--resume", action="store_true", help="Skip batches with existing .par.csv"
+    )
     parser.add_argument("--batch-size", type=int, default=50, help="Fields per batch")
     parser.add_argument(
         "--workers", type=int, default=10, help="PEST workers per batch"
@@ -289,11 +520,28 @@ def main():
             parser.error(f"No batch directories found in {output_root}")
         print(f"Running {len(batch_dirs)} batches sequentially...")
         for bd in batch_dirs:
+            if args.resume and _find_par_csv(bd) is not None:
+                print(f"\n=== {bd.name} === SKIP (has .par.csv)")
+                continue
             print(f"\n=== {bd.name} ===")
             run_batch(bd, num_workers=args.workers)
 
     elif args.action == "merge":
         merge_parameters(output_root)
+
+    elif args.action == "ingest-batch":
+        if args.batch_id is None:
+            parser.error("--batch-id required for ingest-batch")
+        ingest_batch(args.container, output_root, args.batch_id)
+
+    elif args.action == "ingest-all":
+        ingest_all(args.container, output_root)
+
+    elif args.action == "status":
+        show_status(args.container)
+
+    elif args.action == "plot-phi":
+        plot_phi(args.container)
 
 
 if __name__ == "__main__":
