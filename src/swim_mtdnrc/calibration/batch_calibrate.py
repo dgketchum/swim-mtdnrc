@@ -30,6 +30,8 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 
+import hashlib
+
 TONGUE_ROOT = Path("/nas/swim/examples/tongue")
 DEFAULT_CONTAINER = TONGUE_ROOT / "data/tongue.swim"
 DEFAULT_TOML = TONGUE_ROOT / "tongue.toml"
@@ -58,6 +60,94 @@ def _update_batch_entry(output_root, batch_id, entry):
     log_data = _read_batch_log(output_root)
     log_data[str(batch_id)] = entry
     _write_batch_log(output_root, log_data)
+
+
+def preflight_gate(container_path, toml_path, output_root, override=False):
+    """Hard gate: run container health check and block on FAIL.
+
+    Writes health.json + health.html to output_root.
+    Returns HealthReport.
+    Raises ContainerHealthError if any FAIL and override is False.
+    """
+    from swimrs.container.container import SwimContainer
+    from swimrs.swim.config import ProjectConfig
+
+    config = ProjectConfig()
+    config.read_config(str(toml_path), calibrate=True)
+    container = SwimContainer.open(str(container_path), mode="r")
+    try:
+        report = container.report(
+            config=config,
+            raise_on_fail=(not override),
+            output_dir=str(output_root),
+        )
+        if not report.passed and override:
+            print(
+                f"WARNING: {len(report.failures)} FAIL(s) overridden by --override flag"
+            )
+            override_record = {
+                "timestamp": datetime.now().isoformat(),
+                "failures": [c.to_dict() for c in report.failures],
+                "user_override": True,
+            }
+            (Path(output_root) / "override_log.json").write_text(
+                json.dumps(override_record, indent=2)
+            )
+        return report
+    finally:
+        container.close()
+
+
+def _create_run_manifest(
+    output_root,
+    container_path,
+    toml_path,
+    report,
+    batches,
+    noptmax,
+    reals,
+    workers,
+    batch_size,
+    override,
+):
+    """Write run_manifest.json at the start of calibrate_all."""
+    run_id = f"tongue_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    config_hash = None
+    try:
+        config_bytes = Path(toml_path).read_bytes()
+        config_hash = f"sha256:{hashlib.sha256(config_bytes).hexdigest()}"
+    except Exception:
+        pass
+
+    manifest = {
+        "run_id": run_id,
+        "timestamp": datetime.now().isoformat(),
+        "container_path": str(container_path),
+        "container_fingerprint": report.container_fingerprint,
+        "config_path": str(toml_path),
+        "config_hash": config_hash,
+        "policy_version": report.policy_version,
+        "gate_outcome": "PASS" if report.passed else "OVERRIDE" if override else "FAIL",
+        "gate_failures": [c.to_dict() for c in report.failures],
+        "gate_warnings": [c.message for c in report.warnings],
+        "override": override,
+        "parameters": {
+            "noptmax": noptmax,
+            "reals": reals,
+            "workers": workers,
+            "batch_size": batch_size,
+            "n_batches": len(batches),
+            "n_fields": sum(
+                len(b[1]) if isinstance(b, tuple) else len(b) for b in batches
+            ),
+        },
+    }
+
+    manifest_path = Path(output_root) / "run_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    print(f"Run manifest: {manifest_path}")
+    return run_id
 
 
 def partition_fields_by_gfid(shapefile, batch_size=50):
@@ -271,6 +361,7 @@ def calibrate_all(
     noptmax=3,
     reals=20,
     resume=False,
+    override=False,
 ):
     """Pipelined batch calibration: build, run, ingest, cleanup one batch at a time.
 
@@ -279,6 +370,15 @@ def calibrate_all(
     """
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+
+    # --- Preflight gate ---
+    try:
+        report = preflight_gate(
+            container_path, toml_path, output_root, override=override
+        )
+    except Exception as e:
+        print(f"PREFLIGHT GATE BLOCKED: {e}")
+        raise
 
     # --- Batch manifest: single source of truth ---
     manifest_path = output_root / "batch_manifest.csv"
@@ -333,6 +433,20 @@ def calibrate_all(
         print("All batches already processed.")
         show_status(container_path)
         return
+
+    # --- Run manifest ---
+    _create_run_manifest(
+        output_root,
+        container_path,
+        toml_path,
+        report,
+        to_process,
+        noptmax,
+        reals,
+        num_workers,
+        batch_size,
+        override,
+    )
 
     print(f"\nProcessing {len(to_process)} batches (pipeline mode)...\n")
 
@@ -875,6 +989,11 @@ def main():
     parser.add_argument(
         "--resume", action="store_true", help="Skip batches with existing .par.csv"
     )
+    parser.add_argument(
+        "--override",
+        action="store_true",
+        help="Override preflight gate failures (log and continue)",
+    )
     parser.add_argument("--batch-size", type=int, default=50, help="Fields per batch")
     parser.add_argument(
         "--workers", type=int, default=10, help="PEST workers per batch"
@@ -984,6 +1103,7 @@ def main():
             noptmax=args.noptmax,
             reals=args.reals,
             resume=args.resume,
+            override=args.override,
         )
 
     elif args.action == "cleanup-failed":
