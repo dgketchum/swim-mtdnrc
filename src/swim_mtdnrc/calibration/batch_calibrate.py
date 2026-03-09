@@ -120,17 +120,30 @@ def _create_run_manifest(
     except Exception:
         pass
 
+    if report is not None:
+        fingerprint = report.container_fingerprint
+        policy_version = report.policy_version
+        gate_outcome = "PASS" if report.passed else "OVERRIDE" if override else "FAIL"
+        gate_failures = [c.to_dict() for c in report.failures]
+        gate_warnings = [c.message for c in report.warnings]
+    else:
+        fingerprint = "skipped"
+        policy_version = "skipped"
+        gate_outcome = "SKIPPED"
+        gate_failures = []
+        gate_warnings = []
+
     manifest = {
         "run_id": run_id,
         "timestamp": datetime.now().isoformat(),
         "container_path": str(container_path),
-        "container_fingerprint": report.container_fingerprint,
+        "container_fingerprint": fingerprint,
         "config_path": str(toml_path),
         "config_hash": config_hash,
-        "policy_version": report.policy_version,
-        "gate_outcome": "PASS" if report.passed else "OVERRIDE" if override else "FAIL",
-        "gate_failures": [c.to_dict() for c in report.failures],
-        "gate_warnings": [c.message for c in report.warnings],
+        "policy_version": policy_version,
+        "gate_outcome": gate_outcome,
+        "gate_failures": gate_failures,
+        "gate_warnings": gate_warnings,
         "override": override,
         "parameters": {
             "noptmax": noptmax,
@@ -362,6 +375,7 @@ def calibrate_all(
     reals=20,
     resume=False,
     override=False,
+    skip_health=False,
 ):
     """Pipelined batch calibration: build, run, ingest, cleanup one batch at a time.
 
@@ -372,13 +386,52 @@ def calibrate_all(
     output_root.mkdir(parents=True, exist_ok=True)
 
     # --- Preflight gate ---
-    try:
-        report = preflight_gate(
-            container_path, toml_path, output_root, override=override
-        )
-    except Exception as e:
-        print(f"PREFLIGHT GATE BLOCKED: {e}")
-        raise
+    if skip_health:
+        # Verify a prior health check exists in the container
+        from swimrs.container.container import SwimContainer
+        from swimrs.container.health import fingerprint_container
+
+        c = SwimContainer.open(str(container_path), mode="r")
+        try:
+            last_hc = c._root.attrs.get("last_health_check")
+            if not last_hc:
+                raise RuntimeError(
+                    "No prior health check found in container. "
+                    "Run 'swim prep' or 'build_container' first (without --skip-health), "
+                    "or remove --skip-health from this command."
+                )
+
+            current_fp = fingerprint_container(c._root, c._field_uids)
+            stored_fp = last_hc.get("fingerprint", "")
+            if current_fp != stored_fp:
+                print(
+                    f"WARNING: container fingerprint changed since last health check "
+                    f"(stored={stored_fp[:8]}… current={current_fp[:8]}…). "
+                    f"Consider re-running without --skip-health."
+                )
+
+            if not last_hc.get("passed", False):
+                print(
+                    f"WARNING: last health check FAILED "
+                    f"({last_hc.get('n_fail', '?')} failures at {last_hc.get('timestamp', '?')})"
+                )
+
+            print(
+                f"Using prior health check from {last_hc.get('timestamp', '?')} "
+                f"(fingerprint={stored_fp[:8]}…, passed={last_hc.get('passed')})"
+            )
+        finally:
+            c.close()
+
+        report = None
+    else:
+        try:
+            report = preflight_gate(
+                container_path, toml_path, output_root, override=override
+            )
+        except Exception as e:
+            print(f"PREFLIGHT GATE BLOCKED: {e}")
+            raise
 
     # --- Batch manifest: single source of truth ---
     manifest_path = output_root / "batch_manifest.csv"
@@ -994,6 +1047,11 @@ def main():
         action="store_true",
         help="Override preflight gate failures (log and continue)",
     )
+    parser.add_argument(
+        "--skip-health",
+        action="store_true",
+        help="Skip preflight health check (requires prior check stored in container)",
+    )
     parser.add_argument("--batch-size", type=int, default=50, help="Fields per batch")
     parser.add_argument(
         "--workers", type=int, default=10, help="PEST workers per batch"
@@ -1104,6 +1162,7 @@ def main():
             reals=args.reals,
             resume=args.resume,
             override=args.override,
+            skip_health=args.skip_health,
         )
 
     elif args.action == "cleanup-failed":

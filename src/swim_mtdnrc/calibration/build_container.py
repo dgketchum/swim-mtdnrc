@@ -140,8 +140,8 @@ def compute(container):
     print("\nCompute complete.")
 
 
-def build(container_path=None, steps=None, overwrite=False):
-    """Build the SwimContainer: create, ingest, compute."""
+def build(container_path=None, steps=None, overwrite=False, skip_health=False):
+    """Build the SwimContainer: create, ingest, compute, health check."""
     if steps is None:
         steps = ["ingest", "compute"]
 
@@ -162,6 +162,21 @@ def build(container_path=None, steps=None, overwrite=False):
                 compute(container)
             else:
                 print(f"Unknown step: {step}")
+
+        if not skip_health:
+            print("\n=== Health Check ===")
+            try:
+                container.report(
+                    config={
+                        "mask_mode": "irrigation",
+                        "etf_target_model": "ensemble",
+                        "etf_ensemble_members": ETF_MODELS,
+                        "met_source": "gridmet",
+                        "snow_source": "snodas",
+                    },
+                )
+            except Exception as e:
+                print(f"Health check failed: {e}")
     finally:
         container.close()
         print(f"\nContainer closed: {container_path}")
@@ -188,10 +203,20 @@ def main():
         action="store_true",
         help="Overwrite existing container",
     )
+    parser.add_argument(
+        "--skip-health",
+        action="store_true",
+        help="Skip post-build health check (runs by default)",
+    )
     args = parser.parse_args()
 
     steps = [s.strip() for s in args.steps.split(",")]
-    build(container_path=args.container, steps=steps, overwrite=args.overwrite)
+    build(
+        container_path=args.container,
+        steps=steps,
+        overwrite=args.overwrite,
+        skip_health=args.skip_health,
+    )
 
 
 if __name__ == "__main__":
