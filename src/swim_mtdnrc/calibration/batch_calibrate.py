@@ -111,7 +111,10 @@ def _do_build(config, container, batch_id, noptmax, reals):
         print(f"  Batch {batch_id:03d}: spinup ({n} fields)...")
         builder.spinup()
         print(f"  Batch {batch_id:03d}: build_pest...")
-        builder.build_pest(target_etf="ssebop")
+        builder.build_pest(
+            target_etf=config.etf_target_model or "ssebop",
+            members=config.etf_ensemble_members,
+        )
         print(f"  Batch {batch_id:03d}: build_localizer...")
         builder.build_localizer()
         print(f"  Batch {batch_id:03d}: write_control_settings...")
