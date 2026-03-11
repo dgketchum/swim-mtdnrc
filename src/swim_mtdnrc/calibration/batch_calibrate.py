@@ -863,10 +863,16 @@ def ingest_batch(container_path, output_root, batch_id, summary_stat="median"):
         )
 
         # Get summary and store in container attrs
+        # .pst may be in pest/ (pre-run) or master/ (pyemu copies it there)
+        master_dir = batch_dir / "master"
         pst_files = list((batch_dir / "pest").glob("*.pst"))
+        if not pst_files:
+            pst_files = list(master_dir.glob("*.pst"))
         if pst_files:
             project_name = pst_files[0].stem
-            results = PestResults(str(batch_dir / "pest"), project_name)
+            results = PestResults(
+                str(batch_dir / "pest"), project_name, master_dir=str(master_dir)
+            )
             summary = results.get_summary()
 
             cal_group = container._root["calibration"]
