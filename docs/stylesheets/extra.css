@@ -1,0 +1,25 @@
+:root {
+  --md-primary-fg-color: #0f766e;
+  --md-primary-fg-color--light: #14b8a6;
+  --md-primary-fg-color--dark: #115e59;
+  --md-accent-fg-color: #10b981;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #0f766e;
+  --md-primary-fg-color--light: #14b8a6;
+  --md-primary-fg-color--dark: #0b4f49;
+  --md-accent-fg-color: #34d399;
+}
+
+.md-typeset a {
+  color: #047857;
+}
+
+.md-typeset a:hover {
+  color: #059669;
+}
+
+.md-header {
+  border-bottom: 1px solid rgba(15, 118, 110, 0.2);
+}

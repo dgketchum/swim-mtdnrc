@@ -1,0 +1,87 @@
+site_name: SWIM-MTDNRC
+site_description: Montana DNRC workflow docs built on top of SWIM-RS
+site_url: https://swim-mtdnrc.readthedocs.io
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: green
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: light green
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Source Sans 3
+    code: IBM Plex Mono
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - header.autohide
+
+plugins:
+  - search
+  - include-markdown
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            heading_level: 2
+            members_order: source
+            docstring_style: google
+
+markdown_extensions:
+  - tables
+  - fenced_code
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - admonition
+  - pymdownx.details
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - https://unpkg.com/mermaid@10/dist/mermaid.min.js
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Repo Organization: repo-organization.md
+  - Data Assets: data-assets.md
+  - Workflows:
+      - SID Extraction: workflows/sid-extraction.md
+      - Tongue Data Assembly: workflows/tongue-data-assembly.md
+      - Tongue Calibration: workflows/tongue-calibration.md
+      - Tongue Clustering and Analysis: workflows/tongue-clustering-analysis.md
+  - Reference:
+      - Entry Points: reference/entry-points.md
+      - Known Issues: reference/known-issues.md
+  - Archive:
+      - Legacy Calibration Note: calibration.md
