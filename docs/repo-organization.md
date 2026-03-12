@@ -1,11 +1,5 @@
 # Repo Organization
 
-## Purpose
-
-`swim-mtdnrc` is a project-workflow repository layered on top of `swim-rs`.
-The code here is real package code, but the repo should be understood primarily
-through its workflows and outputs rather than as a general-purpose framework.
-
 ## Top-Level Layout
 
 | Path | Role |
@@ -14,7 +8,6 @@ through its workflows and outputs rather than as a general-purpose framework.
 | `scripts/` | Thin CLI wrappers around the package `main()` entry points |
 | `docs/` | Collaborator-facing project documentation |
 | `tests/` | Targeted tests for project logic |
-| `notes/` | Internal notes and plans; not part of the public docs surface |
 | `README.md` | Front door for repo users |
 
 ## Code Layout
@@ -55,17 +48,6 @@ Supporting analysis workflows for:
 - streamflow download
 - meteorology and streamflow feature-table assembly
 - cluster and continuous regression analyses
-
-## Why `src/` Stays
-
-The `src/` layout is still the right structure for this repo because:
-
-- workflow modules are imported by multiple scripts
-- the repo has tests that target package behavior
-- the code is more stable than an ad hoc scripts-only layout
-
-The docs should solve the comprehension problem by explaining what the package
-does, not by hiding the package structure.
 
 ## How This Relates to `swim-rs`
 

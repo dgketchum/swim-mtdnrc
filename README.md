@@ -10,6 +10,8 @@ project-layer repo that assembles those capabilities into Montana DNRC-specific
 work products such as statewide SID extraction, Tongue data assembly, batch
 calibration, and post-calibration analysis.
 
+Framework docs: [SWIM-RS documentation](https://swim-rs.readthedocs.io/en/latest/)
+
 This repo should be read as a workflow repository, not as a standalone
 framework.
 
@@ -45,7 +47,6 @@ flowchart LR
 - `src/swim_mtdnrc/analysis` - streamflow download and regression analysis
 - `scripts/` - thin CLI wrappers for the main workflows
 - `docs/` - collaborator-facing project documentation
-- `notes/` - internal planning and working notes, not public docs
 
 <!--docs-index-end-->
 
