@@ -1,6 +1,9 @@
 site_name: SWIM-MTDNRC
 site_description: Montana DNRC workflow docs built on top of SWIM-RS
 site_url: https://swim-mtdnrc.readthedocs.io
+exclude_docs: |
+  workflows/tongue-clustering-analysis.md
+  notebooks/04_tongue_clustering_workflow.ipynb
 
 theme:
   name: material
@@ -38,6 +41,9 @@ theme:
 plugins:
   - search
   - include-markdown
+  - mkdocs-jupyter:
+      execute: false
+      include_source: true
   - mkdocstrings:
       handlers:
         python:
@@ -79,9 +85,13 @@ nav:
       - SID Extraction: workflows/sid-extraction.md
       - Tongue Data Assembly: workflows/tongue-data-assembly.md
       - Tongue Calibration: workflows/tongue-calibration.md
-      - Tongue Clustering and Analysis: workflows/tongue-clustering-analysis.md
   - Reference:
       - Entry Points: reference/entry-points.md
       - Known Issues: reference/known-issues.md
+  - Notebooks:
+      - Notebook Index: notebooks/index.md
+      - Tongue Overview: notebooks/01_tongue_overview.ipynb
+      - Tongue Calibration Artifacts: notebooks/02_tongue_calibration_artifacts.ipynb
+      - Tongue Field Trace: notebooks/03_tongue_field_trace.ipynb
   - Archive:
       - Legacy Calibration Note: calibration.md

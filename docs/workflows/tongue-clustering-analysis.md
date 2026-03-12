@@ -90,6 +90,12 @@ This workflow does not replace calibration. It complements calibration by:
 - providing cluster-level interpretation
 - contextualizing basin response against met and streamflow variability
 
+## Notebook Demo
+
+Use this only after reading this workflow page:
+
+- [04 Tongue Clustering Workflow](../notebooks/04_tongue_clustering_workflow.ipynb)
+
 ## Caveats
 
 - This workflow is partly interpretive, not purely operational.
