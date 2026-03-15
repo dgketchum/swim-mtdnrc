@@ -28,7 +28,7 @@ OPENET_ETa_V2 = "projects/openet/assets/ensemble/conus/gridmet/monthly/v2_0"
 OPENET_ETa_PRE2000 = (
     "projects/openet/assets/ensemble/conus/gridmet/monthly/v2_0_pre2000"
 )
-ETa_SPLIT_YEAR = 2000  # use PRE2000 collection for year < 2000
+ETa_SPLIT_YEAR = 1999  # v2_0 starts 1999-10; route 1999 to v2_0 for full year coverage
 ETa_BAND = "et_ensemble_mad"  # band name in monthly ensemble (mm/month)
 
 
@@ -45,7 +45,7 @@ def extract_eta(
     irr_min_yr_mask,
     mask_type="irr",
     start_yr=1984,
-    end_yr=2025,
+    end_yr=2024,
     years=None,
     feature_id="FID",
     dest="bucket",
@@ -185,7 +185,7 @@ if __name__ == "__main__":
         help="Comma-separated mask types",
     )
     parser.add_argument("--start-yr", type=int, default=1984)
-    parser.add_argument("--end-yr", type=int, default=2025)
+    parser.add_argument("--end-yr", type=int, default=2024)
     parser.add_argument(
         "--years",
         type=str,
