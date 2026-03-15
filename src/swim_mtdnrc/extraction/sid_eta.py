@@ -32,10 +32,10 @@ ETa_SPLIT_YEAR = 1999  # v2_0 starts 1999-10; route 1999 to v2_0 for full year c
 ETa_BAND = "et_ensemble_mad"  # band name in monthly ensemble (mm/month)
 
 
-def _blob_exists(bucket_name: str, blob_name: str) -> bool:
+def _blob_exists(bucket_name: str, blob_name: str, project: str) -> bool:
     from google.cloud import storage
 
-    client = storage.Client()
+    client = storage.Client(project=project)
     return client.bucket(bucket_name).blob(blob_name).exists()
 
 
@@ -51,6 +51,8 @@ def extract_eta(
     dest="bucket",
     bucket="wudr",
     file_prefix="sid",
+    project="ee-hoylman",
+    skip_exists_check=False,
 ):
     """Extract mean monthly ETa per field from OpenET monthly ensemble collections.
 
@@ -61,6 +63,8 @@ def extract_eta(
     ----------
     years : list[int] or None
         Explicit list of years to process. Overrides start_yr/end_yr.
+    skip_exists_check : bool
+        If True, skip the GCS blob-exists check (use when project lacks bucket read access).
     """
     if years is None:
         years = list(range(start_yr, end_yr + 1))
@@ -74,7 +78,11 @@ def extract_eta(
             f"{file_prefix}/eta/monthly/{mask_type}/ensemble_eta_{mask_type}_{year}"
         )
 
-        if dest == "bucket" and _blob_exists(bucket, fn_prefix + ".csv"):
+        if (
+            not skip_exists_check
+            and dest == "bucket"
+            and _blob_exists(bucket, fn_prefix + ".csv", project)
+        ):
             print(f"  {year}: skip (exists) gs://{bucket}/{fn_prefix}.csv")
             continue
 
@@ -197,6 +205,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--project", type=str, default="ee-hoylman", help="EE project ID"
     )
+    parser.add_argument(
+        "--skip-exists-check",
+        action="store_true",
+        default=False,
+        help="Skip GCS blob-exists check (use when project lacks bucket read access)",
+    )
     args = parser.parse_args()
 
     year_list = [int(y) for y in args.years.split(",")] if args.years else None
@@ -259,6 +273,8 @@ if __name__ == "__main__":
                     dest=args.dest,
                     bucket=args.bucket,
                     file_prefix=f"sid/{label}",
+                    project=args.project,
+                    skip_exists_check=args.skip_exists_check,
                 )
                 elapsed = time.time() - start_time
 
