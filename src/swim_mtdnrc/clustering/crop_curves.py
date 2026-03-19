@@ -227,7 +227,8 @@ def plot_crop_curves(centroids, assignments, all_profiles, all_labels, output_di
             cluster_profiles[cid] = all_profiles[mask]
 
     # Composite plot
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig = plt.figure(figsize=(12, 6))
+    ax = fig.add_subplot(1, 1, 1)
     for i, (cid, profile) in enumerate(sorted(centroids.items())):
         ax.plot(days, profile, color=colors[i], linewidth=2, label=f"Cluster {cid}")
         if cid in cluster_profiles:
@@ -250,7 +251,8 @@ def plot_crop_curves(centroids, assignments, all_profiles, all_labels, output_di
 
     # Individual cluster plots
     for cid, profile in sorted(centroids.items()):
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig = plt.figure(figsize=(10, 5))
+        ax = fig.add_subplot(1, 1, 1)
         ax.plot(days, profile, color="green", linewidth=2)
         if cid in cluster_profiles:
             p25 = np.percentile(cluster_profiles[cid], 25, axis=0)
