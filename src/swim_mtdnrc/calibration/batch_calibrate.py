@@ -21,6 +21,7 @@ Usage:
 import argparse
 import json
 import multiprocessing
+import os
 import re
 import shutil
 import traceback
@@ -65,11 +66,12 @@ def _update_batch_entry(output_root, batch_id, entry):
 def preflight_gate(container_path, toml_path, output_root, override=False):
     """Hard gate: run container health check and block on FAIL.
 
-    Writes health.json + health.html to output_root.
+    Writes health artifacts under output_root/health/<timestamp>/.
     Returns HealthReport.
     Raises ContainerHealthError if any FAIL and override is False.
     """
     from swimrs.container.container import SwimContainer
+    from swimrs.container.health import health_report_output_dir
     from swimrs.swim.config import ProjectConfig
 
     config = ProjectConfig()
@@ -79,7 +81,12 @@ def preflight_gate(container_path, toml_path, output_root, override=False):
         report = container.report(
             config=config,
             raise_on_fail=(not override),
-            output_dir=str(output_root),
+            output_dir=str(
+                health_report_output_dir(
+                    str(container_path), base_dir=Path(output_root)
+                )
+            ),
+            health_profile="calibration",
         )
         if not report.passed and override:
             print(
@@ -163,43 +170,227 @@ def _create_run_manifest(
     return run_id
 
 
-def partition_fields_by_gfid(shapefile, batch_size=50):
-    """Group FIDs by GFID and greedily pack into batches.
+def _ingested_batch_ids(container_path, output_root):
+    """Return the set of batch ids already ingested into the container or log."""
+    ingested = {
+        bid
+        for bid, entry in _read_batch_log(output_root).items()
+        if entry.get("status") == "ingested"
+    }
+    try:
+        from swimrs.container.container import SwimContainer
+
+        container = SwimContainer.open(str(container_path), mode="r")
+        try:
+            if "calibration" in container._root:
+                batches_str = container._root["calibration"].attrs.get("batches", "{}")
+                ingested.update(json.loads(batches_str).keys())
+        finally:
+            container.close()
+    except Exception:
+        pass
+    return ingested
+
+
+def _all_manifest_batches_ingested(container_path, output_root):
+    """Check whether every batch in the manifest has been ingested."""
+    manifest_path = Path(output_root) / "batch_manifest.csv"
+    if not manifest_path.exists():
+        return False, set()
+
+    manifest = pd.read_csv(manifest_path)
+    expected = {str(int(batch_id)) for batch_id in manifest["batch_id"].unique()}
+    ingested = _ingested_batch_ids(container_path, output_root)
+    missing = expected - ingested
+    return not missing, missing
+
+
+def persist_calibration_resolved_state(
+    container_path,
+    toml_path,
+    output_root,
+    *,
+    command="batch_calibrate",
+):
+    """Persist the canonical post-calibration restart run in the container."""
+    all_ingested, missing = _all_manifest_batches_ingested(container_path, output_root)
+    if not all_ingested:
+        missing_str = ", ".join(sorted(missing, key=int)[:10])
+        print(
+            "Skipping calibration resolved state: not all manifest batches are ingested"
+            + (f" (missing: {missing_str})" if missing_str else "")
+        )
+        return False
+
+    from swimrs.container.container import SwimContainer
+    from swimrs.swim.config import ProjectConfig
+
+    config = ProjectConfig()
+    config.read_config(str(toml_path), calibrate=True)
+
+    container = SwimContainer.open(str(container_path), mode="r+")
+    try:
+        container.run(
+            run_id="calibration_resolved_state",
+            profile="state_only",
+            overwrite=True,
+            engine="python",
+            refet_type=getattr(config, "refet_type", "eto") or "eto",
+            etf_model=getattr(config, "etf_target_model", "ssebop") or "ssebop",
+            met_source=getattr(config, "met_source", "gridmet") or "gridmet",
+            mask_mode=getattr(config, "mask_mode", "irrigation") or "irrigation",
+            ndvi_mode="observed",
+            max_irr_rate=getattr(config, "max_irr_rate", 100.0) or 100.0,
+            command=command,
+            run_attrs={
+                "run_role": "resolved_restart",
+                "source_context": "post_calibration",
+            },
+            use_default_restart=False,
+        )
+        container.runs.set_default_restart("calibration_resolved_state")
+        container.save()
+    finally:
+        container.close()
+
+    print("Persisted calibration resolved restart state: calibration_resolved_state")
+    return True
+
+
+def _coerce_fid(raw) -> str:
+    """Normalize a FID value to a clean string.
+
+    Handles pandas int→float upcasting ("1.0" → "1") without corrupting
+    underscore-delimited IDs like "001_000001".
+    """
+    s = str(raw)
+    return str(int(float(s))) if s.replace(".", "", 1).isdigit() else s
+
+
+def get_uncovered_fids(
+    container_path, masks=("irr", "inv_irr")
+) -> dict[str, list[str]]:
+    """Return FIDs with zero observations across all masks for key RS variables.
+
+    A field is considered uncovered for a variable if it has zero non-NaN
+    values in every available mask array (union of irr + inv_irr).  These
+    fields cannot be calibrated and should be excluded from the batch manifest.
+
+    Parameters
+    ----------
+    container_path : str or Path
+        Path to a .swim container.
+    masks : tuple[str]
+        Mask suffixes to check (default: irr and inv_irr).
+
+    Returns
+    -------
+    dict with keys ``"ndvi"``, ``"etf"``, and ``"all"`` (union).
+    Each value is a sorted list of FID strings.
+    """
+    import numpy as np
+
+    from swimrs.container.container import SwimContainer
+
+    check_paths = {
+        "ndvi": [f"remote_sensing/ndvi/landsat/{m}" for m in masks],
+        "etf": [f"remote_sensing/etf/landsat/ensemble/{m}" for m in masks],
+    }
+
+    c = SwimContainer.open(str(container_path), mode="r")
+    try:
+        field_uids = c._field_uids
+        n = len(field_uids)
+        uncovered: dict[str, list[str]] = {}
+
+        for var, paths in check_paths.items():
+            total_obs = np.zeros(n, dtype=int)
+            found_any = False
+            for path in paths:
+                if path in c._root:
+                    arr = c._root[path][:]
+                    total_obs += np.sum(~np.isnan(arr), axis=0)
+                    found_any = True
+            if found_any:
+                zero_idx = np.where(total_obs == 0)[0]
+                uncovered[var] = sorted(field_uids[i] for i in zero_idx)
+
+        uncovered["all"] = sorted(set().union(*uncovered.values()))
+        return uncovered
+    finally:
+        c.close()
+
+
+def partition_fields_by_gfid(
+    shapefile,
+    batch_size=50,
+    gfid_column="GFID",
+    exclude_fids=None,
+):
+    """Group FIDs by GFID (if present) and greedily pack into batches.
+
+    When ``gfid_column`` is absent from the shapefile, falls back to
+    simple sequential packing by FID order — suitable for county
+    containers (e.g. SID) that lack a GridMET grid-cell column.
 
     Parameters
     ----------
     shapefile : str or Path
-        Path to shapefile with FID and GFID columns.
+        Path to shapefile with a FID column and optionally a GFID column.
     batch_size : int
         Target number of fields per batch.
+    gfid_column : str
+        Name of the grid-cell grouping column (default: ``"GFID"``).
+    exclude_fids : set[str] | None
+        FIDs to omit from all batches before packing.
 
     Returns
     -------
     list[list[str]]
         Each inner list is a batch of FID strings.
     """
+    exclude_fids = set(exclude_fids or [])
     gdf = gpd.read_file(str(shapefile), engine="fiona")
     gdf = gdf.drop_duplicates(subset="FID", keep="first")
 
-    # Group FIDs by GFID
-    groups = {}
-    for _, row in gdf.iterrows():
-        gfid = str(int(row["GFID"]))
-        fid = str(int(row["FID"]))
-        groups.setdefault(gfid, []).append(fid)
+    has_gfid = gfid_column in gdf.columns
 
-    # Greedy bin-packing: add GFIDs to current batch until it exceeds target
-    batches = []
-    current_batch = []
-    for gfid in sorted(groups.keys(), key=int):
-        fids = groups[gfid]
-        if current_batch and len(current_batch) + len(fids) > batch_size:
+    if has_gfid:
+        # Group FIDs by GFID, then bin-pack groups
+        groups: dict[str, list[str]] = {}
+        for _, row in gdf.iterrows():
+            fid = _coerce_fid(row["FID"])
+            if fid in exclude_fids:
+                continue
+            gfid = _coerce_fid(row[gfid_column])
+            groups.setdefault(gfid, []).append(fid)
+
+        # Sort groups; try numeric sort, fall back to lexicographic
+        try:
+            sorted_keys = sorted(groups.keys(), key=int)
+        except ValueError:
+            sorted_keys = sorted(groups.keys())
+
+        batches: list[list[str]] = []
+        current_batch: list[str] = []
+        for gfid in sorted_keys:
+            fids = groups[gfid]
+            if current_batch and len(current_batch) + len(fids) > batch_size:
+                batches.append(current_batch)
+                current_batch = []
+            current_batch.extend(fids)
+        if current_batch:
             batches.append(current_batch)
-            current_batch = []
-        current_batch.extend(fids)
-
-    if current_batch:
-        batches.append(current_batch)
+    else:
+        # Simple sequential packing — no grid-cell grouping
+        all_fids = [
+            _coerce_fid(row["FID"])
+            for _, row in gdf.iterrows()
+            if _coerce_fid(row["FID"]) not in exclude_fids
+        ]
+        batches = [
+            all_fids[i : i + batch_size] for i in range(0, len(all_fids), batch_size)
+        ]
 
     return batches
 
@@ -376,11 +567,30 @@ def calibrate_all(
     resume=False,
     override=False,
     skip_health=False,
+    exclude_uncovered=False,
+    skip_fids_path=None,
+    gfid_column="GFID",
 ):
     """Pipelined batch calibration: build, run, ingest, cleanup one batch at a time.
 
     Pre-builds the next batch in a background process while the current batch's
     PEST++ run executes. At most 2 batch directories on disk at any time.
+
+    Parameters
+    ----------
+    exclude_uncovered : bool
+        If True, inspect the container before creating the batch manifest and
+        exclude any fields that have zero observations across all masks for
+        NDVI and ETf.  Excluded FIDs are written to ``excluded_fids.json``
+        alongside the manifest as an audit trail.
+    skip_fids_path : str or Path or None
+        Path to a plain-text file listing additional FIDs to exclude, one per
+        line.  Combined with ``exclude_uncovered`` when both are supplied.
+    gfid_column : str
+        Shapefile column used for grid-cell grouping (default: ``"GFID"``).
+        When the column is absent the partitioner falls back to simple
+        sequential packing, which is appropriate for SID county containers
+        that do not have GridMET grid-cell assignments.
     """
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -443,7 +653,50 @@ def calibrate_all(
             for bid in batch_ids
         ]
     else:
-        raw_batches = partition_fields_by_gfid(shapefile, batch_size)
+        # Build exclusion set before partitioning
+        exclude_set: set[str] = set()
+
+        if exclude_uncovered:
+            print("Scanning container for zero-coverage fields…")
+            uncovered = get_uncovered_fids(container_path)
+            exclude_set.update(uncovered["all"])
+            if uncovered["all"]:
+                print(
+                    f"  Excluding {len(uncovered['all'])} uncovered field(s): "
+                    f"ndvi={len(uncovered.get('ndvi', []))}, "
+                    f"etf={len(uncovered.get('etf', []))}"
+                )
+
+        if skip_fids_path is not None:
+            skip_fids_path = Path(skip_fids_path)
+            extra = {
+                line.strip()
+                for line in skip_fids_path.read_text().splitlines()
+                if line.strip()
+            }
+            exclude_set.update(extra)
+            print(
+                f"  Excluding {len(extra)} additional field(s) from {skip_fids_path.name}"
+            )
+
+        if exclude_set:
+            excluded_record = {
+                "timestamp": datetime.now().isoformat(),
+                "n_excluded": len(exclude_set),
+                "source": {
+                    "exclude_uncovered": exclude_uncovered,
+                    "skip_fids_path": str(skip_fids_path) if skip_fids_path else None,
+                },
+                "fids": sorted(exclude_set),
+            }
+            (output_root / "excluded_fids.json").write_text(
+                json.dumps(excluded_record, indent=2)
+            )
+            print(f"  Wrote excluded_fids.json ({len(exclude_set)} field(s))")
+
+        raw_batches = partition_fields_by_gfid(
+            shapefile, batch_size, gfid_column=gfid_column, exclude_fids=exclude_set
+        )
         rows = [
             {"batch_id": i, "FID": fid}
             for i, batch in enumerate(raw_batches)
@@ -702,6 +955,13 @@ def calibrate_all(
         prebuild_proc.join(timeout=60)
 
     print("\n=== Pipeline complete ===")
+    os.chdir(output_root)
+    persist_calibration_resolved_state(
+        container_path,
+        toml_path,
+        output_root,
+        command="batch_calibrate --action calibrate-all",
+    )
     show_status(container_path)
 
 
@@ -1062,6 +1322,24 @@ def main():
     parser.add_argument(
         "--workers", type=int, default=10, help="PEST workers per batch"
     )
+    parser.add_argument(
+        "--exclude-uncovered",
+        action="store_true",
+        help="Exclude fields with zero RS observations (NDVI+ETf union) from the manifest.",
+    )
+    parser.add_argument(
+        "--skip-fids",
+        type=str,
+        default=None,
+        help="Path to a text file listing FIDs to exclude (one per line).",
+    )
+    parser.add_argument(
+        "--gfid-column",
+        type=str,
+        default="GFID",
+        help="Shapefile column for grid-cell grouping. Omit or set to a missing "
+        "column to use simple sequential packing (default: GFID).",
+    )
     parser.add_argument("--noptmax", type=int, default=4, help="Max PEST iterations")
     parser.add_argument("--reals", type=int, default=200, help="Ensemble realizations")
     parser.add_argument(
@@ -1091,11 +1369,43 @@ def main():
     output_root.mkdir(parents=True, exist_ok=True)
 
     if args.action == "prep":
-        batches = partition_fields_by_gfid(args.shapefile, args.batch_size)
+        exclude_set: set[str] = set()
+        if args.exclude_uncovered:
+            print("Scanning container for zero-coverage fields…")
+            uncovered = get_uncovered_fids(args.container)
+            exclude_set.update(uncovered["all"])
+            print(
+                f"  ndvi uncovered: {len(uncovered.get('ndvi', []))}, "
+                f"etf uncovered: {len(uncovered.get('etf', []))}, "
+                f"total excluded: {len(uncovered['all'])}"
+            )
+        if args.skip_fids:
+            extra = {
+                line.strip()
+                for line in Path(args.skip_fids).read_text().splitlines()
+                if line.strip()
+            }
+            exclude_set.update(extra)
+            print(f"  Additional skip-fids: {len(extra)}")
+        if exclude_set:
+            excluded_record = {
+                "timestamp": datetime.now().isoformat(),
+                "n_excluded": len(exclude_set),
+                "fids": sorted(exclude_set),
+            }
+            excluded_path = output_root / "excluded_fids.json"
+            excluded_path.write_text(json.dumps(excluded_record, indent=2))
+            print(f"  Wrote {excluded_path}")
+
+        batches = partition_fields_by_gfid(
+            args.shapefile,
+            args.batch_size,
+            gfid_column=args.gfid_column,
+            exclude_fids=exclude_set,
+        )
         print(f"Partitioned into {len(batches)} batches:")
         for i, batch in enumerate(batches):
             print(f"  Batch {i:03d}: {len(batch)} fields")
-        # Write batch manifest
         manifest = output_root / "batch_manifest.csv"
         rows = []
         for i, batch in enumerate(batches):
@@ -1149,6 +1459,12 @@ def main():
 
     elif args.action == "ingest-all":
         ingest_all(args.container, output_root)
+        persist_calibration_resolved_state(
+            args.container,
+            args.toml,
+            output_root,
+            command="batch_calibrate --action ingest-all",
+        )
 
     elif args.action == "status":
         show_status(args.container)
@@ -1169,6 +1485,9 @@ def main():
             resume=args.resume,
             override=args.override,
             skip_health=args.skip_health,
+            exclude_uncovered=args.exclude_uncovered,
+            skip_fids_path=args.skip_fids,
+            gfid_column=args.gfid_column,
         )
 
     elif args.action == "cleanup-failed":

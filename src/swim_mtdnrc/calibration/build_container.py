@@ -15,6 +15,7 @@ import argparse
 from pathlib import Path
 
 from swimrs.container.container import SwimContainer
+from swimrs.container.health import health_report_output_dir
 
 TONGUE_ROOT = Path("/nas/swim/examples/tongue")
 TONGUE_NEW = Path("/nas/swim/examples/tongue_new")
@@ -174,6 +175,8 @@ def build(container_path=None, steps=None, overwrite=False, skip_health=False):
                         "met_source": "gridmet",
                         "snow_source": "snodas",
                     },
+                    output_dir=str(health_report_output_dir(str(container_path))),
+                    health_profile="calibration",
                 )
             except Exception as e:
                 print(f"Health check failed: {e}")
