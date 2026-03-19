@@ -18,6 +18,7 @@ dependencies = [
     "earthengine-api",
     "dataretrieval",
     "swimrs @ file:///home/dgketchum/code/swim-rs",
+    "ipykernel>=7.2.0",
 ]
 
 [dependency-groups]
