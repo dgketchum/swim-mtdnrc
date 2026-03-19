@@ -181,33 +181,53 @@ def _copy_properties(
     bucket_root: Path,
     dst_dir: Path,
 ) -> None:
-    """Merge sub-batch irr properties CSVs into a single county file."""
+    """Merge sub-batch properties CSVs into per-county output files.
+
+    Expects the new schema with named files per property type:
+      irrigation.csv  → irr_sid_{county}.csv
+      ssurgo.csv      → ssurgo_{county}.csv
+      landcover.csv   → landcover_{county}.csv
+      cdl.csv         → cdl_{county}.csv
+    """
     # Search each sub-batch dir; also check the main county dir if separate
     search_dirs = list(src_counties)
     if county not in src_counties:
         search_dirs.append(county)
 
-    all_dfs: list[pd.DataFrame] = []
-    for sc in search_dirs:
-        props_dir = bucket_root / sc / "properties"
-        if not props_dir.is_dir():
-            continue
-        for f in sorted(props_dir.glob("irr_sid_*.csv")):
+    # property source name → output name suffix
+    prop_files = {
+        "irrigation.csv": f"irr_sid_{county}.csv",
+        "ssurgo.csv": f"ssurgo_{county}.csv",
+        "landcover.csv": f"landcover_{county}.csv",
+        "cdl.csv": f"cdl_{county}.csv",
+    }
+
+    out_dir = dst_dir / "properties"
+    found_any = False
+
+    for src_name, out_name in prop_files.items():
+        all_dfs: list[pd.DataFrame] = []
+        for sc in search_dirs:
+            f = bucket_root / sc / "properties" / src_name
+            if not f.exists():
+                continue
             try:
                 all_dfs.append(pd.read_csv(f))
             except Exception as exc:
                 log.warning("failed to read %s: %s", f, exc)
 
-    if not all_dfs:
-        log.warning("no properties found for county %s", county)
-        return
+        if not all_dfs:
+            continue
 
-    df = pd.concat(all_dfs, ignore_index=True).drop_duplicates(subset="FID")
-    out_dir = dst_dir / "properties"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"irr_sid_{county}.csv"
-    df.to_csv(out_file, index=False)
-    log.debug("wrote %s (%d rows)", out_file, len(df))
+        found_any = True
+        df = pd.concat(all_dfs, ignore_index=True).drop_duplicates(subset="FID")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / out_name
+        df.to_csv(out_file, index=False)
+        log.debug("wrote %s (%d rows)", out_file, len(df))
+
+    if not found_any:
+        log.warning("no properties found for county %s", county)
 
 
 def assemble_county(
