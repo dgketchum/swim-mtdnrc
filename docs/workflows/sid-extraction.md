@@ -1,93 +1,101 @@
 # SID Extraction
 
-## Purpose
+These tools handle the county-scale extraction jobs for swim inputs:
+ETf, NDVI, IrrMapper irrigation, and related QC, plus the generalized OpenET ETf
+extractor for non-Tongue field sets (Wyoming Tongue).
+The main entry points are `run_openet_etf.py` and the direct module commands
+for `sid_etf`, `sid_ndvi`, `sid_irr`, and `sid_diagnostics`. Their outputs are
+extraction files organized by county, mask, model, and year. These are operational
+export workflows, not lightweight local scripts, so the important things to
+document for any run are the field set, export naming, mask behavior, and where
+the resulting files were staged for downstream assembly. As of 2026-03-12 they are
+in the `gs://wudr/sid` bucket, mirrored locally to `/nas/swim/sid/bucket/`.
 
-These workflows produce remote-sensing inputs keyed to SID or other state-scale
-field identifiers. They are upstream of Tongue assembly and are also useful for
-broader DNRC extraction work.
+---
 
-## When To Use This Workflow
+## Prepped Layout
 
-Use the SID and state-scale extraction tools when you need:
+`sid_prepped.py` restructures the bucket mirror into a collaborator-ready tree
+at `/nas/swim/sid/prepped/`. Each county gets its own subdirectory:
 
-- county-partitioned ETf or NDVI exports keyed to SID fields
-- irrigation classification extracts for SID fields
-- OpenET ETf exports for non-Montana field sets using the same workflow shape
+```
+/nas/swim/sid/prepped/
+  {county}/                    e.g. 003, 073, 081
+    gis/
+      sid_{county}.shp         SID fields for this county (fiona-written)
+      sid_{county}.{shx,dbf,prj,cpg}
+    properties/
+      irr_sid_{county}.csv     IrrMapper irrigation fractions
+    ndvi/
+      irr/   ndvi_irr_{year}.csv
+      inv_irr/
+    etf/
+      {model}/
+        irr/   {model}_etf_irr_{year}.csv
+        inv_irr/
+    eta/
+      irr/   ensemble_eta_irr_{year}.csv   (columns: ensemble_eta_YYYYMM01)
+      inv_irr/
+```
 
-## Primary Entry Points
+Sub-batches are merged transparently: `073a/ + 073b/ → 073/`,
+`081a/b/c/d/ → 081/`.
 
-| Entry point | Scope |
-|-------------|-------|
-| `uv run python /home/dgketchum/code/swim-mtdnrc/scripts/run_openet_etf.py ...` | state-scale OpenET ETf extraction for non-Tongue field sets |
-| `uv run python -m swim_mtdnrc.extraction.sid_etf ...` | SID ETf extraction |
-| `uv run python -m swim_mtdnrc.extraction.sid_ndvi ...` | SID NDVI extraction |
-| `uv run python -m swim_mtdnrc.extraction.sid_irr ...` | SID irrigation extraction |
-| `uv run python -m swim_mtdnrc.extraction.sid_diagnostics ...` | SID QC and diagnostics |
+ETa column renaming: raw `YYYY_MM` columns become `ensemble_eta_YYYYMM01`
+so the 8-digit suffix is parseable by `swimrs` ingest.
 
-## Inputs and Dependencies
+### Running sid_prepped.py
 
-This workflow depends on:
+All counties, all variables:
 
-- Earth Engine authorization
-- source field boundaries
-- irrigation mask logic from IrrMapper
-- bucket or local export destinations
+```bash
+python -m swim_mtdnrc.extraction.sid_prepped
+```
 
-Typical external dependencies come from `swim-rs` EE helpers plus project
-shapefiles and asset paths.
+Subset run for testing:
 
-## What The Code Does
+```bash
+python -m swim_mtdnrc.extraction.sid_prepped --counties 003,073,081 --overwrite
+```
 
-### ETf
+Key options:
 
-`sid_etf.py` and `openet_etf.py` export ETf for one or more OpenET models by:
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--bucket-root` | `/nas/swim/sid/bucket` | Local bucket mirror |
+| `--prepped-root` | `/nas/swim/sid/prepped` | Output tree |
+| `--counties` | all | Comma-separated county numbers |
+| `--variables` | all | `ndvi,etf,eta,gis,properties` |
+| `--models` | all | ETf models to include |
+| `--masks` | `irr,inv_irr` | Mask types |
+| `--overwrite` | false | Overwrite existing files |
 
-1. loading field boundaries
-2. assigning county grouping
-3. applying irrigation or inverse-irrigation masking
-4. exporting annual CSVs by model and mask
+---
 
-### NDVI
+## Building a County Container
 
-`sid_ndvi.py` exports Landsat NDVI using the same mask semantics and county
-partitioning pattern.
+After assembling the prepped tree, a collaborator can build a swim-rs container
+for any county with:
 
-### Irrigation
+```python
+from swimrs.container import create_container
 
-`sid_irr.py` exports yearly irrigation-classification context used downstream in
-container build and dynamics calculations.
+county = "003"
+prepped = f"/nas/swim/sid/prepped/{county}"
 
-### Diagnostics
+c = create_container(
+    f"sid_{county}.swim",
+    f"{prepped}/gis/sid_{county}.shp",
+    "FID",
+    "1991-01-01",
+    "2023-12-31",
+)
 
-`sid_diagnostics.py` is the QC entry point for checking observation frequency,
-mask behavior, and missingness for extracted data.
+c.ingest.ndvi(f"{prepped}/ndvi/irr", mask="irr")
+c.ingest.etf(f"{prepped}/etf/ensemble/irr", model="ensemble", mask="irr")
+c.ingest.eta(f"{prepped}/eta/irr", mask="irr")
+c.ingest.properties(irr_csv=f"{prepped}/properties/irr_sid_{county}.csv")
+```
 
-## Outputs
-
-Typical output organization is by:
-
-- county or county-chunk
-- variable
-- mask
-- year
-
-This is an extraction workflow, so its primary outputs are intermediate files
-used by later assembly steps rather than collaborator-facing final deliverables.
-
-## Relationship To Tongue
-
-The Tongue workflow uses SID-derived extracts where:
-
-- SID polygons overlap Tongue fields
-- the Tongue-SID crosswalk can map SID field IDs back to Tongue integer FIDs
-
-Those SID extracts are later remapped and merged into Tongue-oriented output
-trees by the Tongue assembly workflow.
-
-## Caveats
-
-- These workflows are Earth Engine jobs, not lightweight local transforms.
-- County and chunk naming matter because downstream assembly assumes the export
-  naming pattern is stable.
-- Irrigation mask year handling is a real correctness concern and should be
-  documented with the run, especially for recent years.
+GridMET met data is not included in the prepped tree — collaborators download
+it separately using swim-rs tooling.
