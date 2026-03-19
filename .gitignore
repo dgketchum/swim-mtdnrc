@@ -115,6 +115,5 @@ nohup.out
 *.csv
 *.nc
 *.tif
-CLAUDE.md
 commands.sh
 commits.sh
