@@ -23,12 +23,11 @@ IRR_MAX_YEAR = 2025
 FEATURE_ID = "FID"
 SHAPEFILE = "/nas/Montana/statewide_irrigation_dataset/statewide_irrigation_dataset_15FEB2024_aea.shp"
 
-# OpenET monthly ensemble ETa collections
+# OpenET monthly ensemble ETa collections (merge both; monthly mosaic collapses overlap)
 OPENET_ETa_V2 = "projects/openet/assets/ensemble/conus/gridmet/monthly/v2_0"
 OPENET_ETa_PRE2000 = (
     "projects/openet/assets/ensemble/conus/gridmet/monthly/v2_0_pre2000"
 )
-ETa_SPLIT_YEAR = 1999  # v2_0 starts 1999-10; route 1999 to v2_0 for full year coverage
 ETa_BAND = "et_ensemble_mad"  # band name in monthly ensemble (mm/month)
 
 
@@ -53,6 +52,7 @@ def extract_eta(
     file_prefix="sid",
     project="ee-hoylman",
     skip_exists_check=False,
+    per_month=False,
 ):
     """Extract mean monthly ETa per field from OpenET monthly ensemble collections.
 
@@ -65,6 +65,9 @@ def extract_eta(
         Explicit list of years to process. Overrides start_yr/end_yr.
     skip_exists_check : bool
         If True, skip the GCS blob-exists check (use when project lacks bucket read access).
+    per_month : bool
+        If True, export one CSV per month instead of one per year. Months with
+        no imagery are skipped rather than causing a toBands() failure.
     """
     if years is None:
         years = list(range(start_yr, end_yr + 1))
@@ -72,14 +75,13 @@ def extract_eta(
     dfs = []
 
     for year in years:
-        src_path = OPENET_ETa_V2 if year >= ETa_SPLIT_YEAR else OPENET_ETa_PRE2000
-
         fn_prefix = (
             f"{file_prefix}/eta/monthly/{mask_type}/ensemble_eta_{mask_type}_{year}"
         )
 
         if (
-            not skip_exists_check
+            not per_month
+            and not skip_exists_check
             and dest == "bucket"
             and _blob_exists(bucket, fn_prefix + ".csv", project)
         ):
@@ -94,12 +96,113 @@ def extract_eta(
         )
         irr_mask = irr_min_yr_mask.updateMask(irr.lt(1))
 
-        coll = (
-            ee.ImageCollection(src_path)
+        raw = (
+            ee.ImageCollection(OPENET_ETa_V2)
+            .merge(ee.ImageCollection(OPENET_ETa_PRE2000))
             .filterDate(f"{year}-01-01", f"{year + 1}-01-01")
             .filterBounds(feature_coll.geometry())
             .select(ETa_BAND)
         )
+
+        if per_month:
+            for month in range(1, 13):
+                fn_prefix_m = f"{fn_prefix}_{month:02d}"
+
+                if (
+                    not skip_exists_check
+                    and dest == "bucket"
+                    and _blob_exists(bucket, fn_prefix_m + ".csv", project)
+                ):
+                    print(f"  {year}-{month:02d}: skip (exists)")
+                    continue
+
+                start = ee.Date.fromYMD(year, month, 1)
+                end = start.advance(1, "month")
+                month_coll = raw.filterDate(start, end)
+
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        n_images = month_coll.size().getInfo()
+                        break
+                    except ee.ee_exception.EEException as exc:
+                        if attempt == MAX_RETRIES - 1:
+                            raise
+                        print(
+                            f"  size check failed ({exc}), "
+                            f"retrying in {WAIT_MINUTES} min..."
+                        )
+                        time.sleep(WAIT_MINUTES * 60)
+
+                if n_images == 0:
+                    print(f"  {year}-{month:02d}: skip (no images)")
+                    continue
+
+                img = month_coll.mosaic()
+                label = f"{year}_{month:02d}"
+
+                if mask_type == "irr":
+                    img = img.updateMask(irr_mask)
+                elif mask_type == "inv_irr":
+                    img = img.updateMask(irr.gt(0))
+
+                img = img.rename([label])
+
+                data = img.reduceRegions(
+                    collection=feature_coll,
+                    reducer=ee.Reducer.mean(),
+                    scale=30,
+                    tileScale=8,
+                )
+
+                if dest == "local":
+                    data_df = ee.data.computeFeatures(
+                        {"expression": data, "fileFormat": "PANDAS_DATAFRAME"}
+                    )
+                    data_df.index = data_df[feature_id]
+                    data_df.drop(columns=["geo"], inplace=True, errors="ignore")
+                    dfs.append(data_df)
+                elif dest == "bucket":
+                    desc = f"ensemble_eta_{mask_type}_{year}_{month:02d}"
+                    selectors = [feature_id, label]
+                    for attempt in range(MAX_RETRIES):
+                        try:
+                            export_table(
+                                data,
+                                desc=desc,
+                                selectors=selectors,
+                                dest="bucket",
+                                bucket=bucket,
+                                fn_prefix=fn_prefix_m,
+                            )
+                            print(
+                                f"  {year}-{month:02d}: export started -> "
+                                f"gs://{bucket}/{fn_prefix_m}.csv",
+                                flush=True,
+                            )
+                            break
+                        except ee.ee_exception.EEException as exc:
+                            if attempt == MAX_RETRIES - 1:
+                                raise
+                            print(
+                                f"  export failed ({exc}), "
+                                f"retrying in {WAIT_MINUTES} min..."
+                            )
+                            time.sleep(WAIT_MINUTES * 60)
+            continue
+
+        # Mosaic per month to collapse spatial tiles
+        months = ee.List.sequence(1, 12)
+
+        def _monthly_mosaic(m):
+            m = ee.Number(m)
+            start = ee.Date.fromYMD(year, m, 1)
+            end = start.advance(1, "month")
+            label = (
+                ee.String(ee.Number(year).format("%d")).cat("_").cat(m.format("%02d"))
+            )
+            return raw.filterDate(start, end).mosaic().set("month_label", label)
+
+        coll = ee.ImageCollection(months.map(_monthly_mosaic))
 
         if mask_type == "irr":
             coll = coll.map(lambda x, _m=irr_mask: x.updateMask(_m))
@@ -108,7 +211,7 @@ def extract_eta(
 
         for attempt in range(MAX_RETRIES):
             try:
-                scenes = coll.aggregate_histogram("system:index").getInfo()
+                scenes = coll.aggregate_histogram("month_label").getInfo()
                 break
             except ee.ee_exception.EEException as exc:
                 if attempt == MAX_RETRIES - 1:
@@ -117,7 +220,7 @@ def extract_eta(
                 time.sleep(WAIT_MINUTES * 60)
 
         band_names = sorted(scenes.keys())
-        print(f"  {year}: {len(band_names)} months ({src_path.split('/')[-1]})")
+        print(f"  {year}: {len(band_names)} months", flush=True)
         bands = coll.toBands().rename(band_names)
 
         data = bands.reduceRegions(
@@ -146,6 +249,10 @@ def extract_eta(
                         dest="bucket",
                         bucket=bucket,
                         fn_prefix=fn_prefix,
+                    )
+                    print(
+                        f"  {year}: export started -> gs://{bucket}/{fn_prefix}.csv",
+                        flush=True,
                     )
                     break
                 except ee.ee_exception.EEException as exc:
@@ -211,6 +318,12 @@ if __name__ == "__main__":
         default=False,
         help="Skip GCS blob-exists check (use when project lacks bucket read access)",
     )
+    parser.add_argument(
+        "--per-month",
+        action="store_true",
+        default=False,
+        help="Export one CSV per month (skips empty months instead of failing)",
+    )
     args = parser.parse_args()
 
     year_list = [int(y) for y in args.years.split(",")] if args.years else None
@@ -275,6 +388,7 @@ if __name__ == "__main__":
                     file_prefix=f"sid/{label}",
                     project=args.project,
                     skip_exists_check=args.skip_exists_check,
+                    per_month=args.per_month,
                 )
                 elapsed = time.time() - start_time
 
