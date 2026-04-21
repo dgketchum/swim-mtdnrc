@@ -18,6 +18,8 @@ start.
 | `scripts/run_openet_etf.py` | custom wrapper around `swim_mtdnrc.extraction.openet_etf.run` | state-scale OpenET extraction |
 | `scripts/run_regression.py` | `swim_mtdnrc.analysis.regression.main` | feature table and regression outputs |
 | `scripts/run_streamflow.py` | `swim_mtdnrc.analysis.streamflow.main` | USGS Tongue streamflow download |
+| `scripts/run_build_library.py` | `swim_mtdnrc.clustering.crop_library.main` | build crop-type NDVI curve library |
+| `scripts/run_scenario.py` | custom wrapper | build scenario container and diagnostics |
 
 ## Direct Module Entry Points
 
@@ -29,6 +31,7 @@ These are important because not every stable workflow has a wrapper script.
 | `uv run python -m swim_mtdnrc.calibration.prep_inputs --help` | local prep utilities |
 | `uv run python -m swim_mtdnrc.clustering.crop_curves --help` | crop curves and phenology |
 | `uv run python -m swim_mtdnrc.clustering.cdl_crosstab --help` | cluster x CDL analysis |
+| `uv run python -m swim_mtdnrc.clustering.crop_library --help` | crop-type NDVI curve library |
 | `uv run python -m swim_mtdnrc.extraction.sid_etf --help` | SID ETf extraction |
 | `uv run python -m swim_mtdnrc.extraction.sid_ndvi --help` | SID NDVI extraction |
 | `uv run python -m swim_mtdnrc.extraction.sid_irr --help` | SID irrigation extraction |

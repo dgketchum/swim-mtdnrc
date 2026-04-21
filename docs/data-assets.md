@@ -1,43 +1,15 @@
 # Data Assets
 
-## Purpose
+These docs assume collaborators are working from the shipped Tongue project
+directory:
 
-Most of the operational artifacts used by `swim-mtdnrc` live outside the repo
-under `/nas/`. This page summarizes the active path conventions and what each
-tree is used for.
+- `tongue_ensemble/`
 
-## Core Project Roots
+Older assembly roots are intentionally out of scope for the collaborator docs.
 
-| Path | Role |
-|------|------|
-| `/nas/swim/examples/tongue/` | Legacy Tongue project root |
-| `/nas/swim/examples/tongue_annex/` | Legacy annex extraction root |
-| `/nas/swim/examples/tongue_new/` | Active merged Tongue output root |
+## Project Directory Layout
 
-## What Lives Under Each Root
-
-### `/nas/swim/examples/tongue/`
-
-Legacy source material and earlier project outputs, including:
-
-- original Tongue shapefiles
-- legacy Landsat extracts
-- GridMET parquet files
-- SNODAS extracts
-- properties and prior container artifacts
-
-This tree is still used as an upstream source for some merge and prep steps.
-
-### `/nas/swim/examples/tongue_annex/`
-
-Supplemental extraction source for the annex fields that were merged into the
-broader Tongue workflow. Its main relevance is to older NDVI and ETf merge
-operations.
-
-### `/nas/swim/examples/tongue_new/`
-
-The current merged project root for collaborator-facing outputs. This is the
-main location to document for external users.
+`tongue_ensemble/` is the public project root for the Tongue delivery.
 
 Representative subtrees:
 
@@ -69,20 +41,44 @@ Examples:
 - `ensemble_etf/irr/`
 - `ssebop_etf/inv_irr/`
 
-### Containers
+### Calibration container
 
-The core model deliverable is a `.swim` container built with `swim-rs`.
+The calibration container is the observed-period `.swim` container used for the
+inverse run. It is the container that:
 
-This artifact holds:
+- ingests the extracted remote-sensing and meteorology inputs
+- carries the ETf targets used for calibration
+- stores the calibrated parameter results
+- preserves health and calibration metadata
+
+Typical contents include:
 
 - fields and geometry metadata
 - properties
-- remote sensing time series
+- remote-sensing time series
 - meteorology
 - snow inputs
 - derived arrays
 - calibrated parameters
 - health and run metadata
+
+### Forward run container
+
+A forward run container is a container prepared for evaluation, hindcast, or
+projection after calibration. It keeps the calibrated parameterization but is
+oriented toward running the model forward rather than solving an inverse
+problem.
+
+Relative to the calibration container, a forward run container typically:
+
+- reuses the calibrated parameter state
+- swaps in run-specific forcings or scenario inputs as needed
+- carries forward-run outputs and reports rather than inversion artifacts
+
+The important distinction is:
+
+- calibration container = inverse-run source of truth
+- forward run container = run-ready delivery for hindcast, evaluation, or projection
 
 ### Calibration artifacts
 
@@ -94,6 +90,22 @@ Batch calibration outputs typically include:
 - health reports
 - calibration reports
 
+### Crop curve library
+
+A JSON file containing per-crop-type representative 366-day NDVI curves built
+from CDL-labeled historical profiles.  Used by the scenario workflow to
+substitute crop phenology on selected fields.
+
+- `data/crop_library/tongue_crop_library.json`
+
+### Scenario containers
+
+Scenario containers are clones of the hindcast container with specific fields'
+NDVI replaced by crop-library curves.  They are runnable with `swim run` using
+the same calibrated parameters.
+
+- `data/tongue_<scenario_name>.swim`
+
 ### Analytical outputs
 
 Under clustering and analysis directories, expect:
@@ -104,12 +116,3 @@ Under clustering and analysis directories, expect:
 - CDL cross-tabs
 - feature tables
 - regression summaries
-
-## Documentation Rule of Thumb
-
-When documenting workflows, describe:
-
-- which repo code produces an artifact
-- which `/nas/` path receives it
-- whether the artifact is an upstream input, an intermediate product, or a
-  collaborator-facing deliverable

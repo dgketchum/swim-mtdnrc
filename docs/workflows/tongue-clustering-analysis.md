@@ -96,6 +96,13 @@ Use this only after reading this workflow page:
 
 - [04 Tongue Clustering Workflow](../notebooks/04_tongue_clustering_workflow.ipynb)
 
+## Next Step: Scenario Analysis
+
+The clustering outputs — especially the CDL cross-tabulation and cluster
+assignments — feed directly into the crop curve library used by the scenario
+workflow.  See [Tongue Scenario Analysis](tongue-scenario-analysis.md) for
+building crop-type substitution scenarios from these results.
+
 ## Caveats
 
 - This workflow is partly interpretive, not purely operational.
