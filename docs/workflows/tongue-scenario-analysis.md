@@ -33,9 +33,29 @@ Use this workflow when you need to:
 
 ### 1. Build the crop curve library (one-time)
 
-`clustering.crop_library` loads historical growing-season NDVI profiles, filters
-them by CDL crop classification, computes per-crop-type median curves (with
-25th-75th percentile bands), and extends them to a full 366-day year.
+The library answers: "what does a typical NDVI season look like for each crop
+type in the Tongue basin?"  It is built once from historical data and reused
+across any number of scenarios.
+
+The build process works in three stages:
+
+1. **Load profiles.** Every irrigated field in every year (1987-2024) has a
+   214-day growing-season NDVI time series interpolated from Landsat scenes.
+   The build loads all of these — 55,451 field-year profiles for the Tongue
+   basin.
+
+2. **Filter by CDL crop label.** The USDA Cropland Data Layer classifies each
+   field's crop type annually (2008-2024).  For each crop group (e.g., all
+   CDL code 36 = alfalfa), the matching field-year profiles are pulled out.
+   This gives crop-specific subsets: 8,489 alfalfa profiles, 507 corn
+   profiles, etc.
+
+3. **Compute representative curves.** For each crop group, the per-DOY median
+   across all matching profiles becomes the representative curve.  The
+   214-day growing season (Apr 1 - Oct 31) is extended to a full 366-day year
+   by padding winter months with the boundary values and smoothing the seams
+   with a Gaussian filter.  Percentile bands (25th-75th) capture the
+   year-to-year spread.
 
 ```
 uv run python scripts/run_build_library.py \
@@ -44,7 +64,21 @@ uv run python scripts/run_build_library.py \
     --output /nas/swim/examples/tongue/data/crop_library/tongue_crop_library.json
 ```
 
-The library is a JSON file containing one entry per crop group.
+The output is a JSON file with one entry per crop group.  The Tongue build
+produced five groups from 55,451 profiles:
+
+| Crop Group | Profiles | Peak NDVI | Peak DOY | Greenup DOY |
+|------------|----------|-----------|----------|-------------|
+| alfalfa | 8,489 | 0.637 | 156 (Jun 5) | 105 (Apr 15) |
+| grass_pasture | 5,805 | 0.680 | 173 (Jun 22) | 99 (Apr 9) |
+| other_hay | 4,421 | 0.709 | 165 (Jun 14) | 94 (Apr 4) |
+| corn | 507 | 0.718 | 225 (Aug 13) | 172 (Jun 21) |
+| small_grains | 413 | 0.614 | 179 (Jun 28) | 143 (May 23) |
+
+The phenology reflects real agronomic differences: corn has the latest greenup
+and peak (warm-season annual), alfalfa is early with a moderate peak (perennial,
+multiple cuttings flatten the curve), and small grains peak in late June then
+senesce quickly.
 
 ### 2. Write a scenario specification
 
@@ -70,6 +104,21 @@ Alternatively, use a two-column CSV (`FID,crop`) for bulk substitutions.
 
 ### 3. Build the scenario container
 
+The scenario container is a copy of the hindcast with targeted fields' NDVI
+replaced.  The builder:
+
+1. **Creates a fresh container** with the same fields, date range, and
+   coordinate reference as the source hindcast.
+2. **Copies all data** — meteorology, soil properties, calibration parameters,
+   and baseline NDVI — from the source.  Simulation runs and restart state
+   from the source are intentionally excluded so the model starts fresh.
+3. **Overwrites NDVI** for each substituted field.  The crop library's 366-day
+   curve is tiled across the container's full time axis by day-of-year,
+   replacing both the irrigated and non-irrigated NDVI masks.
+4. **Recomputes irrigation windows** (`irr_data`) from the modified NDVI using
+   slope-based detection, so the model sees irrigation timing consistent with
+   the new crop's phenology.
+
 ```
 uv run python scripts/run_scenario.py \
     --scenario /path/to/scenario.toml \
@@ -77,8 +126,8 @@ uv run python scripts/run_scenario.py \
     --report-dir /nas/swim/examples/tongue_ensemble/reports/corn_expansion/
 ```
 
-This clones the hindcast container, overwrites the targeted fields' NDVI with
-the crop library curves, and recomputes irrigation windows.
+The result is a standard `.swim` container that works with all existing
+`swim run` options — no special flags needed.
 
 ### 4. Review the diagnostics report
 
@@ -108,16 +157,16 @@ baseline hindcast to quantify the impact of the crop change.
 
 ## Crop Library Reference
 
-The Tongue River library contains five crop groups built from 2008-2021
-CDL-labeled NDVI profiles:
+The Tongue River library contains five crop groups built from 55,451 field-year
+NDVI profiles (1987-2024) filtered by CDL crop labels (2008-2024):
 
-| Crop Group | CDL Codes | Description |
-|------------|-----------|-------------|
-| `alfalfa` | 36 | Dominant irrigated crop in the basin |
-| `grass_pasture` | 171, 176 | Rangeland and pasture |
-| `other_hay` | 37 | Non-alfalfa hay |
-| `corn` | 1 | Irrigated corn (concentrated in cluster 0) |
-| `small_grains` | 21, 23, 24, 25, 27, 28, 29 | Barley, wheat, oats, and other small grains |
+| Crop Group | CDL Codes | Profiles | Peak NDVI | Season |
+|------------|-----------|----------|-----------|--------|
+| `alfalfa` | 36 | 8,489 | 0.637 | Apr 15 - Oct, multiple cuts |
+| `grass_pasture` | 171, 176 | 5,805 | 0.680 | Apr 9 - Oct, single broad peak |
+| `other_hay` | 37 | 4,421 | 0.709 | Apr 4 - Oct |
+| `corn` | 1 | 507 | 0.718 | Jun 21 - Oct, late sharp peak Aug 13 |
+| `small_grains` | 21, 23, 24, 25, 27, 28, 29 | 413 | 0.614 | May 23 - Sep, early peak Jun 28 |
 
 ## Main Outputs
 
