@@ -9,12 +9,17 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
 
 log = logging.getLogger(__name__)
+
+# Per-worker shapefile cache (populated by _init_worker)
+_worker_gdf: gpd.GeoDataFrame | None = None
+_worker_shapefile: str | None = None
 
 DEFAULT_BUCKET_ROOT = Path("/nas/swim/sid/bucket")
 DEFAULT_PREPPED_ROOT = Path("/nas/swim/sid/prepped")
@@ -29,7 +34,7 @@ BATCH_MAP: dict[str, list[str]] = {
     "081": ["081a", "081b", "081c", "081d"],
 }
 
-ALL_MASKS = ("irr", "inv_irr")
+ALL_MASKS = ("irr", "inv_irr", "no_mask")
 ALL_VARIABLES = ("ndvi", "etf", "eta", "gis", "properties")
 
 
@@ -52,27 +57,56 @@ def _copy_ndvi(
     dst_dir: Path,
     masks: tuple[str, ...],
 ) -> None:
-    """Merge sub-batch NDVI CSVs and write one file per year/mask."""
+    """Merge sub-batch NDVI CSVs and write one file per year/mask.
+
+    Handles two source layouts:
+      - Annual: ndvi_{mask}_{year}.csv
+      - Half:   ndvi_{mask}_{year}_h[12].csv  (merged into one annual file)
+    Annual files take precedence over half files for the same year.
+    """
     for mask in masks:
-        year_files: dict[str, list[Path]] = {}
+        # Build one DataFrame per (source-county, year), then concat across sources.
+        # Each source county may use annual or half-year format — handle independently
+        # so half-year sources are not dropped when another sub-batch has an annual file.
+        year_dfs: dict[str, list[pd.DataFrame]] = {}
+
         for sc in src_counties:
             src = bucket_root / sc / "ndvi" / mask
             if not src.is_dir():
                 continue
-            for f in sorted(src.glob("ndvi_*.csv")):
-                m = re.search(r"ndvi_\w+_(\d{4})\.csv", f.name)
-                if m:
-                    year_files.setdefault(m.group(1), []).append(f)
 
-        if not year_files:
+            annual: dict[str, Path] = {}
+            halves: dict[str, list[Path]] = {}
+
+            for f in sorted(src.glob("ndvi_*.csv")):
+                m = re.search(r"ndvi_\w+_(\d{4})_h\d\.csv$", f.name)
+                if m:
+                    halves.setdefault(m.group(1), []).append(f)
+                    continue
+                m = re.search(r"ndvi_\w+_(\d{4})\.csv$", f.name)
+                if m:
+                    annual[m.group(1)] = f
+
+            for year in sorted(set(annual) | set(halves)):
+                if year in annual:
+                    df = pd.read_csv(annual[year])
+                else:
+                    parts = [pd.read_csv(p) for p in sorted(halves[year])]
+                    df = parts[0]
+                    for p in parts[1:]:
+                        df = df.merge(p, on="FID", how="outer")
+                if not df.empty:
+                    year_dfs.setdefault(year, []).append(df)
+
+        if not year_dfs:
             continue
 
         out_dir = dst_dir / "ndvi" / mask
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        for year, paths in sorted(year_files.items()):
+        for year, dfs in sorted(year_dfs.items()):
             out_file = out_dir / f"ndvi_{mask}_{year}.csv"
-            df = _concat_csvs(paths)
+            df = pd.concat(dfs, ignore_index=True)
             if df.empty:
                 continue
             df.to_csv(out_file, index=False)
@@ -133,27 +167,62 @@ def _copy_eta(
     dst_dir: Path,
     masks: tuple[str, ...],
 ) -> None:
-    """Merge sub-batch ETa CSVs, rename columns, write one file per year/mask."""
+    """Merge sub-batch ETa CSVs, rename columns, write one file per year/mask.
+
+    Handles two source layouts:
+      - Annual:  ensemble_eta_{mask}_{year}.csv        (one wide CSV per year)
+      - Monthly: ensemble_eta_{mask}_{year}_{month}.csv (one column per month,
+                 used when image gaps caused the annual extraction to drop)
+    Annual files take precedence; monthly files are merged by FID into a wide
+    DataFrame matching the annual format before column renaming.
+    """
     for mask in masks:
-        year_files: dict[str, list[Path]] = {}
+        # Build one DataFrame per (source-county, year), then concat across sources.
+        # Each source county may use annual format, monthly format, or a mix across
+        # years — handle independently so no source is dropped when another uses a
+        # different layout for the same year.
+        year_dfs: dict[str, list[pd.DataFrame]] = {}
+
         for sc in src_counties:
             src = bucket_root / sc / "eta" / "monthly" / mask
             if not src.is_dir():
                 continue
-            for f in sorted(src.glob("ensemble_eta_*.csv")):
-                m = re.search(r"ensemble_eta_\w+_(\d{4})\.csv", f.name)
-                if m:
-                    year_files.setdefault(m.group(1), []).append(f)
 
-        if not year_files:
+            annual: dict[str, Path] = {}
+            monthly: dict[str, dict[str, Path]] = {}
+
+            for f in sorted(src.glob("ensemble_eta_*.csv")):
+                m = re.search(r"ensemble_eta_\w+_(\d{4})_(\d{2})\.csv$", f.name)
+                if m:
+                    monthly.setdefault(m.group(1), {})[m.group(2)] = f
+                    continue
+                m = re.search(r"ensemble_eta_\w+_(\d{4})\.csv$", f.name)
+                if m:
+                    annual[m.group(1)] = f
+
+            for year in sorted(set(annual) | set(monthly)):
+                if year in annual:
+                    df = pd.read_csv(annual[year])
+                else:
+                    month_dfs = [
+                        pd.read_csv(monthly[year][mo])
+                        for mo in sorted(monthly[year])
+                    ]
+                    df = month_dfs[0]
+                    for mdf in month_dfs[1:]:
+                        df = df.merge(mdf, on="FID", how="outer")
+                if not df.empty:
+                    year_dfs.setdefault(year, []).append(df)
+
+        if not year_dfs:
             continue
 
         out_dir = dst_dir / "eta" / mask
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        for year, paths in sorted(year_files.items()):
+        for year, dfs in sorted(year_dfs.items()):
             out_file = out_dir / f"ensemble_eta_{mask}_{year}.csv"
-            df = _concat_csvs(paths)
+            df = pd.concat(dfs, ignore_index=True)
             if df.empty:
                 continue
             df = _rename_eta_columns(df)
@@ -286,6 +355,32 @@ def _all_counties(bucket_root: Path) -> list[str]:
     return sorted(output)
 
 
+def _init_worker(shapefile_path: str | None) -> None:
+    """Load shapefile once per worker process."""
+    global _worker_gdf, _worker_shapefile
+    _worker_shapefile = shapefile_path
+    if shapefile_path:
+        _worker_gdf = gpd.read_file(shapefile_path, engine="fiona")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+
+def _assemble_county_worker(args: tuple) -> str:
+    """Wrapper for ProcessPoolExecutor: unpack args and call assemble_county."""
+    county, bucket_root, prepped_root, models, masks, variables, overwrite = args
+    gdf = _worker_gdf if "gis" in variables else None
+    assemble_county(
+        county,
+        Path(bucket_root),
+        Path(prepped_root),
+        gdf,
+        models,
+        masks,
+        variables,
+        overwrite,
+    )
+    return county
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Assemble SID prepped directory tree from bucket mirror"
@@ -326,6 +421,12 @@ def main() -> None:
         help="Comma-separated mask types (default: irr,inv_irr).",
     )
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel worker processes (default: 1).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -342,24 +443,44 @@ def main() -> None:
         else _all_counties(bucket_root)
     )
 
-    gdf = None
-    if "gis" in variables:
-        log.info("loading shapefile …")
-        gdf = gpd.read_file(args.shapefile, engine="fiona")
-
     prepped_root.mkdir(parents=True, exist_ok=True)
 
-    for county in counties:
-        assemble_county(
-            county,
-            bucket_root,
-            prepped_root,
-            gdf,
-            models,
-            masks,
-            variables,
-            args.overwrite,
-        )
+    shapefile_path = args.shapefile if "gis" in variables else None
+
+    if args.workers > 1:
+        worker_args = [
+            (county, str(bucket_root), str(prepped_root), models, masks, variables, args.overwrite)
+            for county in counties
+        ]
+        with ProcessPoolExecutor(
+            max_workers=args.workers,
+            initializer=_init_worker,
+            initargs=(shapefile_path,),
+        ) as pool:
+            futures = {pool.submit(_assemble_county_worker, a): a[0] for a in worker_args}
+            for fut in as_completed(futures):
+                county = futures[fut]
+                try:
+                    fut.result()
+                    log.info("finished county %s", county)
+                except Exception as exc:
+                    log.error("county %s failed: %s", county, exc)
+    else:
+        gdf = None
+        if shapefile_path:
+            log.info("loading shapefile …")
+            gdf = gpd.read_file(shapefile_path, engine="fiona")
+        for county in counties:
+            assemble_county(
+                county,
+                bucket_root,
+                prepped_root,
+                gdf,
+                models,
+                masks,
+                variables,
+                args.overwrite,
+            )
 
     log.info("done — prepped root: %s", prepped_root)
 
