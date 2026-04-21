@@ -76,7 +76,7 @@ def preflight_gate(container_path, toml_path, output_root, override=False):
 
     config = ProjectConfig()
     config.read_config(str(toml_path), calibrate=True)
-    container = SwimContainer.open(str(container_path), mode="r")
+    container = SwimContainer.open(str(container_path), mode="r+")
     try:
         report = container.report(
             config=config,
@@ -326,6 +326,7 @@ def partition_fields_by_gfid(
     batch_size=50,
     gfid_column="GFID",
     exclude_fids=None,
+    fid_column="FID",
 ):
     """Group FIDs by GFID (if present) and greedily pack into batches.
 
@@ -343,6 +344,8 @@ def partition_fields_by_gfid(
         Name of the grid-cell grouping column (default: ``"GFID"``).
     exclude_fids : set[str] | None
         FIDs to omit from all batches before packing.
+    fid_column : str
+        Name of the field ID column in the shapefile (default: ``"FID"``).
 
     Returns
     -------
@@ -351,7 +354,7 @@ def partition_fields_by_gfid(
     """
     exclude_fids = set(exclude_fids or [])
     gdf = gpd.read_file(str(shapefile), engine="fiona")
-    gdf = gdf.drop_duplicates(subset="FID", keep="first")
+    gdf = gdf.drop_duplicates(subset=fid_column, keep="first")
 
     has_gfid = gfid_column in gdf.columns
 
@@ -359,7 +362,7 @@ def partition_fields_by_gfid(
         # Group FIDs by GFID, then bin-pack groups
         groups: dict[str, list[str]] = {}
         for _, row in gdf.iterrows():
-            fid = _coerce_fid(row["FID"])
+            fid = _coerce_fid(row[fid_column])
             if fid in exclude_fids:
                 continue
             gfid = _coerce_fid(row[gfid_column])
@@ -384,9 +387,9 @@ def partition_fields_by_gfid(
     else:
         # Simple sequential packing — no grid-cell grouping
         all_fids = [
-            _coerce_fid(row["FID"])
+            _coerce_fid(row[fid_column])
             for _, row in gdf.iterrows()
-            if _coerce_fid(row["FID"]) not in exclude_fids
+            if _coerce_fid(row[fid_column]) not in exclude_fids
         ]
         batches = [
             all_fids[i : i + batch_size] for i in range(0, len(all_fids), batch_size)
@@ -570,6 +573,7 @@ def calibrate_all(
     exclude_uncovered=False,
     skip_fids_path=None,
     gfid_column="GFID",
+    fid_column="FID",
 ):
     """Pipelined batch calibration: build, run, ingest, cleanup one batch at a time.
 
@@ -695,7 +699,8 @@ def calibrate_all(
             print(f"  Wrote excluded_fids.json ({len(exclude_set)} field(s))")
 
         raw_batches = partition_fields_by_gfid(
-            shapefile, batch_size, gfid_column=gfid_column, exclude_fids=exclude_set
+            shapefile, batch_size, gfid_column=gfid_column, exclude_fids=exclude_set,
+            fid_column=fid_column,
         )
         rows = [
             {"batch_id": i, "FID": fid}
@@ -1340,6 +1345,12 @@ def main():
         help="Shapefile column for grid-cell grouping. Omit or set to a missing "
         "column to use simple sequential packing (default: GFID).",
     )
+    parser.add_argument(
+        "--fid-column",
+        type=str,
+        default="FID",
+        help="Shapefile column for field IDs (default: FID).",
+    )
     parser.add_argument("--noptmax", type=int, default=4, help="Max PEST iterations")
     parser.add_argument("--reals", type=int, default=200, help="Ensemble realizations")
     parser.add_argument(
@@ -1402,6 +1413,7 @@ def main():
             args.batch_size,
             gfid_column=args.gfid_column,
             exclude_fids=exclude_set,
+            fid_column=args.fid_column,
         )
         print(f"Partitioned into {len(batches)} batches:")
         for i, batch in enumerate(batches):
@@ -1415,7 +1427,7 @@ def main():
         print(f"\nWrote manifest: {manifest}")
 
     elif args.action == "build-all":
-        batches = partition_fields_by_gfid(args.shapefile, args.batch_size)
+        batches = partition_fields_by_gfid(args.shapefile, args.batch_size, fid_column=args.fid_column)
         print(f"Building {len(batches)} batches...")
         for i, batch_fids in enumerate(batches):
             print(f"\n--- Batch {i:03d} ({len(batch_fids)} fields) ---")
@@ -1488,6 +1500,7 @@ def main():
             exclude_uncovered=args.exclude_uncovered,
             skip_fids_path=args.skip_fids,
             gfid_column=args.gfid_column,
+            fid_column=args.fid_column,
         )
 
     elif args.action == "cleanup-failed":
