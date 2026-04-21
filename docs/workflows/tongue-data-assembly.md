@@ -1,35 +1,32 @@
-# Tongue Data Assembly
+# Tongue Ensemble Data Assembly
 
 ## Purpose
 
 This workflow turns upstream Tongue, annex, and SID extractions into a coherent
-Tongue project dataset and then builds a SWIM container suitable for
-calibration, hindcast evaluation, and collaborator handoff.
+Tongue project dataset used for the March 2026 run of OpenET v2.1 ensemble-based SWIM project
+and then builds a SWIM calibration container that is used for 
+calibration, and 'forward-run' containers for hindcast evaluation, and needs (hopefully) light prep for 
+handoff and LOCA-VIC projection application with a 'forward-run' container for forecast.
+
+The quick timeline for this project re-calibration led to the merging of legacy gridmet/snodas/NDVI/etc. data
+with new extracts of OpenET v2.1 ETf data and any missing components. If requested, the entire project could
+be re-run on a clean slate later.
 
 ## End-To-End Operational Flow
 
 ```mermaid
 flowchart TD
-    EX["Remote-sensing extraction<br/>SID, Tongue, annex"] --> XW["Tongue-SID crosswalk"]
+    EX["Remote-sensing extraction and legacy data identification<br/>SID, Tongue, annex"] --> XW["Tongue-SID crosswalk"]
     XW --> SID["SID remap and merge"]
     EX --> LEG["Legacy Tongue and annex merge"]
     SID --> PREP["Prep utilities<br/>GridMET, SNODAS, shapefile cleanup"]
     LEG --> PREP
-    PREP --> BUILD["Build Tongue .swim container"]
+    PREP --> BUILD["Build Tongue .swim calibration container"]
     BUILD --> HEALTH["Container health check"]
     HEALTH --> CAL["Batch calibration"]
     CAL --> RES["Resolved-state or hindcast run<br/>via swim-rs"]
     RES --> REP["Health, calibration, and hindcast reports"]
 ```
-
-## When To Use This Workflow
-
-Use this workflow when you need to:
-
-- reconcile Tongue fields against SID identifiers
-- merge legacy and SID-era extracts into one Tongue dataset
-- prepare Tongue inputs for container ingest
-- build or rebuild the Tongue `.swim` container
 
 ## Primary Entry Points
 
@@ -62,16 +59,16 @@ This step is what makes SID-derived extractions usable in the Tongue workflow.
 - remaps SID IDs to Tongue integer FIDs
 - writes Tongue-oriented annual CSVs in the ingest layout expected by the container
 
-### 3. Merge legacy Tongue sources
+### 3. Merge legacy/new Tongue sources
 
 `swim_mtdnrc.calibration.merge_legacy` handles:
 
 - NDVI overlap between legacy and SID-era sources
-- WY chunk ETf merges
+- WY chunk ensemble ETf merges
 - chunked 2025 NDVI merges
 
-This is the bridge between older Tongue material and the newer merged output
-tree under `/nas/swim/examples/tongue_new/`.
+This is the bridge between older source material and the shipped
+`tongue_ensemble/` project directory.
 
 ### 4. Run prep utilities
 
@@ -111,15 +108,11 @@ explicitly skipped. That report is the gate into calibration.
 | Tongue `.swim` container | primary model and collaborator artifact |
 | health report artifacts | readiness check for calibration and downstream use |
 
-## Relationship To Hindcast And Reporting
 
-This workflow stops at a healthy container. Hindcast or resolved-state forward
-runs happen after calibration, typically using `swim-rs` against the calibrated
-container rather than a dedicated `swim-mtdnrc` wrapper command.
+## Notebook Demos
 
-## Caveats
+See:
 
-- Multiple data trees are involved; path drift between `tongue`, `tongue_annex`,
-  and `tongue_new` should be documented whenever a run is repeated.
-- The crosswalk is a true dependency, not a convenience.
-- Build success is not enough; the health report is the actual handoff gate.
+- [01 Tongue Overview](../notebooks/01_tongue_overview.ipynb)
+- [03 Tongue Field Trace](../notebooks/03_tongue_field_trace.ipynb)
+

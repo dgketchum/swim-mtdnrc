@@ -4,13 +4,14 @@
 
 This workflow calibrates the Tongue container in field batches, persists the
 calibrated parameters back into the container, and records the metadata needed
-to resume work or hand the container to collaborators.
+to resume work with forward-run containters for hindcast/forecast simulation,
+or hand the container to collaborators.
 
 ## Batch Calibration Pipeline
 
 ```mermaid
 flowchart TD
-    GATE["Preflight gate<br/>container health"] --> PART["Partition fields by GFID"]
+    GATE["Health Check Preflight<br/>container health"] --> PART["Partition fields by GFID"]
     PART --> BUILD["Build batch artifacts"]
     BUILD --> RUN["Run PEST++ IES"]
     RUN --> ING["Ingest calibrated parameters"]
@@ -20,15 +21,6 @@ flowchart TD
     NEXT -->|No| RES["Persist resolved restart state"]
     RES --> HIND["Run hindcast or report workflow<br/>via swim-rs"]
 ```
-
-## When To Use This Workflow
-
-Use this workflow when:
-
-- the Tongue container has been built and passed health checks
-- you need calibrated field parameters in the container
-- you need resumable batch orchestration around PEST++
-- you need a collaborator-facing calibrated container rather than loose batch outputs
 
 ## Primary Entry Points
 
@@ -111,9 +103,90 @@ For a calibrated Tongue delivery, collaborators should be able to locate:
 - the run manifest and batch log
 - the default restart or resolved-state metadata in the container
 
+## Notebook Demos
+
+Use these only after reading this workflow page:
+
+- [02 Tongue Calibration Artifacts](../notebooks/02_tongue_calibration_artifacts.ipynb)
+- [03 Tongue Field Trace](../notebooks/03_tongue_field_trace.ipynb)
+
+## Missing Data and SID County Containers
+
+This pipeline also drives calibration for SID county containers, not just the
+Tongue River project. Two important differences from the Tongue setup require
+attention.
+
+### No GFID column
+
+The Tongue shapefile has a `GFID` column linking each field to its GridMET
+grid cell. `partition_fields_by_gfid` uses this to keep spatially adjacent
+fields (same met forcing) in the same batch.
+
+SID county shapefiles do not have a `GFID` column (GridMET data is not yet
+part of the county containers). When the column is absent the partitioner
+falls back to simple sequential packing by FID order. No special flag is
+needed — detection is automatic. If GridMET is later added and a GFID column
+is introduced, pass `--gfid-column GFID` (or whatever the column name is) to
+restore grouped packing.
+
+### Fields with zero remote-sensing coverage
+
+Some fields in every county have all-NaN NDVI and ETf time series across all
+extracted years. These are present in the bucket CSVs but never yielded a
+valid Landsat pixel — typically because the field falls on a scene boundary,
+is consistently cloud-masked, or has `inv_irr`-only coverage that was not
+ingested.
+
+**What happens if you don't exclude them:** they will pass partitioning,
+enter a batch, fail during the PEST++ spinup with a NaN state error, get
+dropped by the build retry, and appear in `batch_log.json` as
+`"dropped_fids"`. The pipeline continues — no data is lost — but the noise
+and the per-batch retry cost are avoidable.
+
+**Recommended approach for county containers:**
+
+```bash
+# Inspect first
+python -m swim_mtdnrc.calibration.batch_calibrate \
+    --action prep \
+    --container /path/to/county.swim \
+    --shapefile /path/to/sid_NNN.shp \
+    --output /path/to/pestrun \
+    --exclude-uncovered
+
+# Then run — manifest is already filtered, --exclude-uncovered is a no-op
+python -m swim_mtdnrc.calibration.batch_calibrate \
+    --action calibrate-all \
+    --container /path/to/county.swim \
+    --shapefile /path/to/sid_NNN.shp \
+    --output /path/to/pestrun \
+    --override \
+    --exclude-uncovered
+```
+
+`--exclude-uncovered` scans the container for fields with zero observations
+in both `irr` and `inv_irr` for NDVI and ETf (union). Excluded FIDs are
+written to `excluded_fids.json` alongside `batch_manifest.csv` as an audit
+trail. If a manifest already exists it is used as-is; the scan only runs when
+the manifest is being created for the first time.
+
+To exclude additional fields manually, put their FIDs one-per-line in a text
+file and pass `--skip-fids /path/to/skip.txt`. This can be combined with
+`--exclude-uncovered`.
+
+**Why `--override` is still needed:** fields with zero coverage in `irr` but
+non-zero coverage in `inv_irr` satisfy the container health policy (union
+check passes). Fields with zero coverage in *both* masks fail the policy. If
+all such fields are excluded via `--exclude-uncovered`, the only remaining
+health FAIL is usually the `lat/lon` check, which is a false alarm for
+GIS-derived containers (coordinates come from the shapefile geometry, not a
+CSV). Pass `--override` to log and proceed past that.
+
 ## Caveats
 
 - Batch outputs are intermediate products; the container is the durable handoff.
 - Resume behavior depends on the manifest and batch log being preserved.
 - Health-check status should be treated as part of run provenance, not as a
   disposable side artifact.
+- `excluded_fids.json` is part of the run provenance: preserve it alongside
+  the manifest so the exclusion decision is auditable.
