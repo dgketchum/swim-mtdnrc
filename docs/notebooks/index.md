@@ -10,6 +10,7 @@ Use them to inspect the Tongue deliverables interactively:
 - [03 Tongue Field Trace](03_tongue_field_trace.ipynb)
 - [04 Tongue Clustering Workflow](04_tongue_clustering_workflow.ipynb)
 - [05 Tongue Crop Library](05_tongue_crop_library.ipynb)
+- [06 Tongue Scenario Demo](06_tongue_scenario_demo.ipynb)
 
 Read the workflow docs first:
 
