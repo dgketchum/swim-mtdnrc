@@ -150,7 +150,8 @@ def scenario_report(
 
 def _plot_library_curves(library, output_dir):
     """Plot all crop library curves with confidence bands."""
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig = plt.figure(figsize=(10, 5))
+    ax = fig.add_subplot(111)
     doys = np.arange(1, FULL_YEAR_DAYS + 1)
 
     colors = plt.cm.tab10(np.linspace(0, 1, len(library)))
@@ -190,17 +191,14 @@ def _plot_before_after(before_curves, after_curves, spec, output_dir):
     ncols = min(4, n)
     nrows = (n + ncols - 1) // ncols
 
-    fig, axes = plt.subplots(
-        nrows, ncols, figsize=(3.5 * ncols, 2.5 * nrows), squeeze=False
-    )
+    fig = plt.figure(figsize=(3.5 * ncols, 2.5 * nrows))
     doys = np.arange(1, FULL_YEAR_DAYS + 1)
 
     # Build FID -> crop lookup
     fid_to_crop = {s.fid: s.target_crop for s in spec.substitutions}
 
     for i, fid in enumerate(fids):
-        row, col = divmod(i, ncols)
-        ax = axes[row, col]
+        ax = fig.add_subplot(nrows, ncols, i + 1)
         ax.plot(
             doys, before_curves[fid], label="before", color="steelblue", linewidth=0.8
         )
@@ -213,11 +211,6 @@ def _plot_before_after(before_curves, after_curves, spec, output_dir):
         ax.tick_params(labelsize=6)
         if i == 0:
             ax.legend(fontsize=6)
-
-    # Hide unused axes
-    for i in range(n, nrows * ncols):
-        row, col = divmod(i, ncols)
-        axes[row, col].set_visible(False)
 
     fig.suptitle(f"Scenario: {spec.name}", fontsize=10)
     fig.tight_layout()
