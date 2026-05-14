@@ -64,7 +64,7 @@ container and records calibration metadata.
 ### 6. Persist resolved restart state
 
 Once all manifest batches are ingested,
-`persist_calibration_resolved_state()` writes a canonical post-calibration
+`persist_calibration_resolved_state()` writes a post-calibration
 restart run into the container so downstream work can reopen a stable
 calibrated state.
 
@@ -89,19 +89,6 @@ The forward pass after calibration is not driven by a dedicated
 3. use `swim-rs` tools or APIs against that calibrated container to run a
    hindcast or equivalent evaluation pass
 4. generate the relevant reports from the calibrated container state
-
-For collaborator docs, the important point is that calibration is the gate into
-that downstream reporting workflow, not the end of the story.
-
-## What Collaborators Should Inspect
-
-For a calibrated Tongue delivery, collaborators should be able to locate:
-
-- the calibrated container path
-- the latest health report
-- the calibration report artifacts
-- the run manifest and batch log
-- the default restart or resolved-state metadata in the container
 
 ## Notebook Demos
 

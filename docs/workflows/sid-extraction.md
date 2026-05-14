@@ -6,7 +6,7 @@ extractor for non-Tongue field sets (Wyoming Tongue).
 The main entry points are `run_openet_etf.py` and the direct module commands
 for `sid_etf`, `sid_ndvi`, `sid_irr`, and `sid_diagnostics`. Their outputs are
 extraction files organized by county, mask, model, and year. These are operational
-export workflows, not lightweight local scripts, so the important things to
+export workflows, so the important things to
 document for any run are the field set, export naming, mask behavior, and where
 the resulting files were staged for downstream assembly. As of 2026-03-12 they are
 in the `gs://wudr/sid` bucket, mirrored locally to `/nas/swim/sid/bucket/`.

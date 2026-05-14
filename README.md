@@ -90,9 +90,3 @@ For direct module entry points that do not have a wrapper script, use:
 uv run python -m swim_mtdnrc.calibration.build_container --help
 ```
 
-## Collaboration Notes
-
-- Do not treat this repo as a replacement for `swim-rs` docs.
-- Use the workflow docs first, then inspect code as needed.
-- Notebooks are planned as guided demonstrations of the Tongue workflow and
-  calibrated deliverables.

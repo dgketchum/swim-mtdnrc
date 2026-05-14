@@ -212,7 +212,7 @@ def persist_calibration_resolved_state(
     *,
     command="batch_calibrate",
 ):
-    """Persist the canonical post-calibration restart run in the container."""
+    """Persist the post-calibration restart run in the container."""
     all_ingested, missing = _all_manifest_batches_ingested(container_path, output_root)
     if not all_ingested:
         missing_str = ", ".join(sorted(missing, key=int)[:10])

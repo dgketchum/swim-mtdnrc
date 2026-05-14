@@ -257,7 +257,7 @@ if __name__ == "__main__":
     parser.add_argument("--dest", choices=["bucket", "local"], default="bucket")
     parser.add_argument("--bucket", type=str, default="wudr")
     parser.add_argument(
-        "--project", type=str, default="ee-hoylman", help="EE project ID"
+        "--project", type=str, default="ee-username", help="EE project ID"
     )
     args = parser.parse_args()
 
